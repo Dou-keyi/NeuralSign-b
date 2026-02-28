@@ -12,7 +12,6 @@ import { useNavigate } from 'react-router-dom';
 import {
     TrendingUp,
     Flame,
-    Trophy,
     Target,
     Clock,
     Zap,
@@ -20,6 +19,7 @@ import {
     Award,
     ChevronRight
 } from 'lucide-react';
+
 
 // Components
 import PageContainer from '@/components/layout/PageContainer';
@@ -30,25 +30,22 @@ import ActivityHeatmap from '@/components/progress/ActivityHeatmap';
 import LearningPath from '@/components/learning/LearningPath';
 import Button from '@/components/common/Button';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
+import XPBar from '@/components/xp/XPBar';
+import RankCard from '@/components/leaderboard/RankCard';
+import BadgeUnlockModal from '@/components/badges/BadgeUnlockModal';
+import BadgeCollection from '@/components/badges/BadgeCollection';
 
 // Services
 import { getUserAchievements } from '@/services/database';
+import { checkAndUnlockAchievements } from '@/services/achievementService';
+import { subscribeToLeaderboard, findUserRank } from '@/services/leaderboardService';
 
 // Store
 import useAuthStore from '@/store/authStore';
 
 // Data
 import { alphabetSigns } from '@/data/signsData';
-
-// Achievement definitions
-const ACHIEVEMENT_DEFINITIONS = [
-    { id: 'first_sign', name: 'First Sign', description: 'Complete your first sign', icon: '🎯' },
-    { id: 'alphabet_master', name: 'Alphabet Master', description: 'Learn all 26 letters', icon: '🔤' },
-    { id: 'week_warrior', name: 'Week Warrior', description: '7-day learning streak', icon: '🔥' },
-    { id: 'quick_learner', name: 'Quick Learner', description: 'Complete 5 signs in one session', icon: '⚡' },
-    { id: 'perfect_score', name: 'Perfect Score', description: 'Get 100% accuracy on a sign', icon: '💯' },
-    { id: 'speed_demon', name: 'Speed Demon', description: 'Complete timed challenge quickly', icon: '🏎️' },
-];
+import { achievements as ACHIEVEMENT_DEFINITIONS, LEGACY_ID_MAP } from '@/data/achievements';
 
 /**
  * Sign Mastery Grid Component
@@ -155,58 +152,7 @@ const SignMasteryGrid = ({ learnedSigns = [], practiceHistory = [] }) => {
 /**
  * Achievements Section Component
  */
-const AchievementsSection = ({ unlockedAchievements = [] }) => {
-    const navigate = useNavigate();
 
-    return (
-        <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.4 }}
-            className="glass-card p-6"
-        >
-            <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-2">
-                    <Trophy className="w-5 h-5 text-warning" />
-                    <h3 className="font-semibold text-dark-100">Achievements</h3>
-                </div>
-                <span className="text-sm text-dark-400">
-                    {unlockedAchievements.length}/{ACHIEVEMENT_DEFINITIONS.length} unlocked
-                </span>
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
-                {ACHIEVEMENT_DEFINITIONS.map((achievement) => {
-                    const isUnlocked = unlockedAchievements.some(a => a.id === achievement.id);
-
-                    return (
-                        <motion.div
-                            key={achievement.id}
-                            whileHover={{ scale: 1.05 }}
-                            className={`
-                                p-3 rounded-xl text-center transition-all
-                                ${isUnlocked
-                                    ? 'bg-gradient-to-br from-primary/20 to-secondary/20 border border-primary/30'
-                                    : 'bg-dark-700/50 border border-dark-600 opacity-50'
-                                }
-                            `}
-                        >
-                            <div className={`text-2xl mb-1 ${isUnlocked ? '' : 'grayscale'}`}>
-                                {achievement.icon}
-                            </div>
-                            <h4 className="text-xs font-medium text-dark-200 mb-0.5 truncate">
-                                {achievement.name}
-                            </h4>
-                            <p className="text-[10px] text-dark-400 line-clamp-2">
-                                {achievement.description}
-                            </p>
-                        </motion.div>
-                    );
-                })}
-            </div>
-        </motion.div>
-    );
-};
 
 /**
  * Progress Page Component
@@ -215,20 +161,98 @@ const Progress = () => {
     const navigate = useNavigate();
     const { user, userData, isLoading } = useAuthStore();
     const [achievements, setAchievements] = useState([]);
+    const [showUnlockModal, setShowUnlockModal] = useState(false);
+    const [newlyUnlockedBadges, setNewlyUnlockedBadges] = useState([]);
 
-    // Load achievements
+    // Leaderboard state for real-time ranking
+    const [userRank, setUserRank] = useState(null);
+    const [totalUsers, setTotalUsers] = useState(0);
+
+    // Subscribe to real-time leaderboard for user ranking
     useEffect(() => {
-        if (user?.uid) {
-            getUserAchievements(user.uid)
-                .then(setAchievements)
-                .catch(console.error);
-        }
+        if (!user?.uid) return;
+
+        const unsubscribe = subscribeToLeaderboard('xp', (leaderboardData) => {
+            setTotalUsers(leaderboardData.length);
+            const rankEntry = findUserRank(user.uid, leaderboardData);
+            setUserRank(rankEntry);
+        }, 100); // Get top 100 to find user rank
+
+        return () => {
+            if (unsubscribe) unsubscribe();
+        };
     }, [user?.uid]);
+
+    // Load achievements with sync
+    useEffect(() => {
+        const syncAndLoad = async () => {
+            if (!user?.uid) return;
+
+            try {
+                // 1. Force check for new unlocks (handles retroactive unlocks)
+                // Pass null to force fetching latest data from DB to ensure we have the most up-to-date progress
+                const newUnlocks = await checkAndUnlockAchievements(user.uid, null);
+
+                if (newUnlocks && newUnlocks.length > 0) {
+                    setNewlyUnlockedBadges(newUnlocks);
+                    setShowUnlockModal(true);
+                }
+
+                // 2. Load updated list
+                const savedAchievements = await getUserAchievements(user.uid);
+
+                // 3. Normalize legacy IDs
+                const normalized = savedAchievements.map(a => {
+                    const newId = LEGACY_ID_MAP[a.id] || a.id;
+                    return { ...a, id: newId };
+                });
+
+                const unique = Array.from(new Map(normalized.map(item => [item.id, item])).values());
+                setAchievements(unique);
+            } catch (error) {
+                console.error("Error syncing achievements:", error);
+            }
+        };
+
+        syncAndLoad();
+    }, [user?.uid, userData]); // Re-run if userData changes (e.g. sign learned)
 
     // Extract user data
     const learnedSigns = userData?.learnedSigns || [];
     const practiceHistory = userData?.practiceHistory || [];
-    const streak = userData?.progress?.streak || 0;
+    // Calculate streak dynamically to match ActivityHeatmap logic
+    const streak = useMemo(() => {
+        if (!practiceHistory?.length) return 0;
+
+        const sessionsByDay = new Set();
+        practiceHistory.forEach(session => {
+            const date = session.timestamp?.toDate?.() || new Date(session.timestamp);
+            date.setHours(0, 0, 0, 0);
+            const dateKey = date.toISOString().split('T')[0];
+            sessionsByDay.add(dateKey);
+        });
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        let currentStreak = 0;
+        // Check up to 365 days back
+        for (let i = 0; i < 365; i++) {
+            const d = new Date(today);
+            d.setDate(d.getDate() - i);
+            d.setHours(0, 0, 0, 0);
+            const dateKey = d.toISOString().split('T')[0];
+
+            if (sessionsByDay.has(dateKey)) {
+                currentStreak++;
+            } else if (i > 0) {
+                // Determine if streak is broken (allow missing today)
+                break;
+            }
+        }
+
+        return currentStreak;
+    }, [practiceHistory]);
     const accuracy = userData?.progress?.accuracy || 0;
     const totalXP = userData?.progress?.totalXP || 0;
 
@@ -291,7 +315,7 @@ const Progress = () => {
                     </div>
                     <Button
                         variant="primary"
-                        onClick={() => navigate('/practice/menu')}
+                        onClick={() => navigate('/practice')}
                         rightIcon={<ChevronRight className="w-4 h-4" />}
                     >
                         Practice Now
@@ -339,6 +363,42 @@ const Progress = () => {
                 />
             </div>
 
+            {/* XP Progress Bar */}
+            <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.2 }}
+                className="mb-8 cursor-pointer transition-transform hover:scale-[1.01]"
+                onClick={() => navigate('/xp-history')}
+                title="View XP History"
+            >
+                <h2 className="text-lg font-semibold text-dark-100 mb-3 flex items-center gap-2">
+                    <Zap className="w-5 h-5 text-warning" />
+                    Level Progress
+                </h2>
+                <XPBar totalXP={totalXP} size="large" />
+            </motion.div>
+
+            {/* Leaderboard + Activity Row */}
+            <div className="grid lg:grid-cols-2 gap-6 mb-8">
+                {/* Leaderboard Section */}
+                <div
+                    onClick={() => navigate('/leaderboard')}
+                    className="cursor-pointer transition-transform hover:scale-[1.01]"
+                    title="View full leaderboard"
+                >
+                    <RankCard
+                        rank={userRank?.rank || 0}
+                        totalUsers={totalUsers}
+                        value={userRank?.xp || totalXP}
+                        metric="xp"
+                    />
+                </div>
+
+                {/* Activity Heatmap */}
+                <ActivityHeatmap practiceHistory={practiceHistory} days={90} />
+            </div>
+
             {/* Charts Row */}
             <div className="grid lg:grid-cols-2 gap-6 mb-6">
                 <AccuracyChart data={practiceHistory} height={220} />
@@ -347,11 +407,6 @@ const Progress = () => {
                     learnedSigns={learnedSigns}
                     height={220}
                 />
-            </div>
-
-            {/* Activity Heatmap */}
-            <div className="mb-6">
-                <ActivityHeatmap practiceHistory={practiceHistory} days={90} />
             </div>
 
             {/* Bottom Row: Mastery + Learning Path */}
@@ -364,7 +419,15 @@ const Progress = () => {
             </div>
 
             {/* Achievements */}
-            <AchievementsSection unlockedAchievements={achievements} />
+            <BadgeCollection unlockedAchievements={achievements} />
+
+            {/* Achievement Unlock Modal */}
+            <BadgeUnlockModal
+                isOpen={showUnlockModal}
+                onClose={() => setShowUnlockModal(false)}
+                badges={newlyUnlockedBadges}
+                onCollect={() => setShowUnlockModal(false)}
+            />
         </PageContainer>
     );
 };

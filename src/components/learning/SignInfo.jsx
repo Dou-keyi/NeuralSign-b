@@ -177,30 +177,6 @@ const SignInfo = memo(({ signData, className = '' }) => {
                     </div>
                 </InfoSection>
             )}
-
-            {/* Practice prompt */}
-            <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ delay: 0.3 }}
-                className="
-          p-4 rounded-xl
-          bg-gradient-to-r from-primary/10 to-secondary/10
-          border border-primary/20
-        "
-            >
-                <div className="flex items-center gap-3">
-                    <div className="p-2 rounded-lg bg-primary/20">
-                        <Info className="w-4 h-4 text-primary" />
-                    </div>
-                    <div>
-                        <h4 className="text-sm font-medium text-dark-100">Ready to practice?</h4>
-                        <p className="text-xs text-dark-400 mt-0.5">
-                            Use the 3D model above to study the hand position
-                        </p>
-                    </div>
-                </div>
-            </motion.div>
         </motion.div>
     );
 });

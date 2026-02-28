@@ -51,7 +51,7 @@ const ResetPasswordForm = ({ onSubmit, isLoading, error, onClearError }) => {
         try {
             await onSubmit(email);
             setIsSuccess(true);
-        } catch (err) {
+        } catch {
             // Error handled by parent
         }
     };

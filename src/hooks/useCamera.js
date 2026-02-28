@@ -1,14 +1,13 @@
 /**
  * useCamera Hook
  * Custom React hook for camera management
- * 
- * NeuralSign - AI Sign Language Learning Platform
+ * * NeuralSign - AI Sign Language Learning Platform
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 
 /**
- * Camera configuration options
+ * Camera configuration options (Preserved from teammate's code)
  */
 const DEFAULT_CONSTRAINTS = {
     video: {
@@ -21,8 +20,7 @@ const DEFAULT_CONSTRAINTS = {
 
 /**
  * Custom hook for managing camera access
- * 
- * @returns {Object} Camera state and controls
+ * * @returns {Object} Camera state and controls
  */
 export function useCamera() {
     // State
@@ -33,6 +31,7 @@ export function useCamera() {
 
     // Refs
     const videoRef = useRef(null);
+    const streamRef = useRef(null); // 🚀 Added to safely track stream for cleanup
 
     /**
      * Start the camera
@@ -50,21 +49,17 @@ export function useCamera() {
         try {
             console.log('📷 Requesting camera access...');
 
-            // Check if mediaDevices is available
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
                 throw new Error('Camera API not supported in this browser');
             }
 
-            // Request camera access
             const mediaStream = await navigator.mediaDevices.getUserMedia(DEFAULT_CONSTRAINTS);
 
             console.log('✅ Camera access granted');
 
-            // Set video source
             if (videoRef.current) {
                 videoRef.current.srcObject = mediaStream;
 
-                // Wait for video to be ready
                 await new Promise((resolve, reject) => {
                     const video = videoRef.current;
 
@@ -75,8 +70,6 @@ export function useCamera() {
                     };
 
                     video.onerror = () => reject(new Error('Video loading failed'));
-
-                    // Timeout after 10 seconds
                     setTimeout(() => reject(new Error('Video loading timeout')), 10000);
                 });
 
@@ -84,32 +77,28 @@ export function useCamera() {
             }
 
             setStream(mediaStream);
+            streamRef.current = mediaStream; // 🚀 Sync ref for stable cleanup
             setIsActive(true);
             setIsLoading(false);
 
             return true;
         } catch (err) {
             console.error('❌ Camera error:', err);
-
             let errorMessage = 'Failed to start camera.';
 
-            // Handle specific errors
             if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-                errorMessage = 'Camera permission denied. Please allow camera access in your browser settings.';
+                errorMessage = 'Camera permission denied. Please allow camera access.';
             } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-                errorMessage = 'No camera found. Please check your device.';
+                errorMessage = 'No camera found.';
             } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-                errorMessage = 'Camera is in use by another application. Please close other apps using the camera.';
-            } else if (err.name === 'OverconstrainedError') {
-                errorMessage = 'Camera does not meet requirements.';
-            } else if (err.message) {
-                errorMessage = err.message;
+                errorMessage = 'Camera is in use by another app.';
+            } else {
+                errorMessage = err.message || errorMessage;
             }
 
             setError(errorMessage);
             setIsLoading(false);
             setIsActive(false);
-
             return false;
         }
     }, [isActive, isLoading]);
@@ -120,57 +109,50 @@ export function useCamera() {
     const stopCamera = useCallback(() => {
         console.log('🛑 Stopping camera...');
 
-        // Stop all media tracks
-        if (stream) {
-            stream.getTracks().forEach(track => {
+        if (streamRef.current) {
+            streamRef.current.getTracks().forEach(track => {
                 track.stop();
                 console.log(`⏹️ Stopped track: ${track.kind}`);
             });
         }
 
-        // Clear video source
         if (videoRef.current) {
             videoRef.current.srcObject = null;
         }
 
         setStream(null);
+        streamRef.current = null;
         setIsActive(false);
         setError(null);
 
         console.log('✅ Camera stopped');
-    }, [stream]);
+    }, []);
 
-    /**
-     * Retry camera start after error
-     */
     const retry = useCallback(() => {
         setError(null);
         startCamera();
     }, [startCamera]);
 
     /**
-     * Cleanup on unmount
+     * 🚀 FIX: Stable Cleanup Logic
+     * Removed [stream] dependency to prevent "auth-then-immediate-kill" loop.
+     * Uses streamRef to ensure cleanup only happens when the component is TRULY unmounted.
      */
     useEffect(() => {
         return () => {
-            if (stream) {
-                console.log('🧹 Cleaning up camera on unmount...');
-                stream.getTracks().forEach(track => track.stop());
+            if (streamRef.current) {
+                console.log('🧹 Cleaning up camera ONCE on true unmount...');
+                streamRef.current.getTracks().forEach(track => track.stop());
             }
         };
-    }, [stream]);
+    }, []); // 👈 Empty dependency array is critical for stability
 
     return {
-        // State
         stream,
         isActive,
         isLoading,
         error,
-
-        // Refs
         videoRef,
-
-        // Actions
         startCamera,
         stopCamera,
         retry

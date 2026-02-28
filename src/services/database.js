@@ -19,14 +19,13 @@ import {
     Timestamp,
 } from 'firebase/firestore';
 import { db } from './firebase';
+import { COLLECTIONS } from './collections';
+export { COLLECTIONS };
+import { addXP, awardPracticeXP, XP_SOURCES } from './xpService';
+import { checkAndAwardMilestones } from './milestoneService';
 
 // Collection names
-export const COLLECTIONS = {
-    USERS: 'users',
-    SIGNS: 'signs',
-    ACHIEVEMENTS: 'achievements',
-    LESSONS: 'lessons',
-};
+
 
 // ============================================
 // USER OPERATIONS
@@ -143,7 +142,13 @@ export async function savePracticeSession(userId, sessionData) {
             updatedAt: serverTimestamp(),
         });
 
+        // Award XP for practice session
+        const xpResult = await awardPracticeXP(userId, sessionData.accuracy || 0, sessionData.sign);
+
         console.log('✅ Practice session saved successfully');
+        console.log(`⭐ XP awarded: +${xpResult.xpGained}`);
+
+        return xpResult;
     } catch (error) {
         console.error('❌ Error saving practice session:', error.message);
         throw new Error('Failed to save practice session.');
@@ -166,7 +171,7 @@ export async function addLearnedSign(userId, signId) {
 
         if (userProfile?.learnedSigns?.includes(signId)) {
             console.log('ℹ️ Sign already learned');
-            return false;
+            return { isNew: false, xpResult: null };
         }
 
         const userRef = doc(db, COLLECTIONS.USERS, userId);
@@ -177,8 +182,27 @@ export async function addLearnedSign(userId, signId) {
             updatedAt: serverTimestamp(),
         });
 
+        // Award XP for learning a new sign
+        const xpDetail = signId.length === 1 ? `Learned letter ${signId}` : `Learned sign ${signId}`;
+        const xpResult = await addXP(userId, XP_SOURCES.SIGN_LEARNED.amount, 'SIGN_LEARNED', xpDetail);
+
+        // Check if any milestones are completed
+        const newSignCount = (userProfile?.learnedSigns?.length || 0) + 1;
+        const milestoneResult = await checkAndAwardMilestones(userId, newSignCount);
+
         console.log('✅ Learned sign added successfully');
-        return true;
+        console.log(`⭐ XP awarded: +${XP_SOURCES.SIGN_LEARNED.amount} for learning ${signId}`);
+
+        // Return the most significant XP result (milestone XP if leveled up, otherwise sign XP)
+        const finalXpResult = milestoneResult?.xpResult?.leveledUp
+            ? milestoneResult.xpResult
+            : xpResult;
+
+        return {
+            isNew: true,
+            xpResult: finalXpResult,
+            milestoneResult
+        };
     } catch (error) {
         console.error('❌ Error adding learned sign:', error.message);
         throw new Error('Failed to add learned sign.');
@@ -512,3 +536,4 @@ export const getUserAchievements = async (userId) => {
     return profile?.achievements || [];
 };
 export const recordPracticeSession = savePracticeSession;
+

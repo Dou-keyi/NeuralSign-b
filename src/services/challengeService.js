@@ -8,6 +8,7 @@
 import { doc, updateDoc, arrayUnion, serverTimestamp, Timestamp } from 'firebase/firestore';
 import { db } from './firebase';
 import { getUserProfile, COLLECTIONS } from './database';
+import { addXP } from './xpService';
 
 // ============================================
 // CHALLENGE DEFINITIONS
@@ -158,13 +159,14 @@ export async function checkChallengeCompletion(userId, challengeId, practiceData
         }
 
         if (meetsRequirements) {
-            // Mark challenge as completed
-            await markChallengeCompleted(userId, challengeId, challenge.reward);
+            // Mark challenge as completed and award XP
+            const xpResult = await markChallengeCompleted(userId, challengeId, challenge.reward);
 
             return {
                 completed: true,
                 reward: challenge.reward,
-                message: `Challenge completed! +${challenge.reward.xp} XP`
+                message: `Challenge completed! +${challenge.reward.xp} XP`,
+                xpResult // Include level-up info if applicable
             };
         }
 
@@ -177,11 +179,12 @@ export async function checkChallengeCompletion(userId, challengeId, practiceData
 }
 
 /**
- * Mark a challenge as completed
+ * Mark a challenge as completed and award XP
  * 
  * @param {string} userId - User ID
  * @param {string} challengeId - Challenge ID
  * @param {Object} reward - Reward object
+ * @returns {Promise<Object>} XP result including level-up info
  */
 async function markChallengeCompleted(userId, challengeId, reward) {
     try {
@@ -193,13 +196,23 @@ async function markChallengeCompleted(userId, challengeId, reward) {
             reward
         };
 
+        // Record the completed challenge
         await updateDoc(userRef, {
             completedChallenges: arrayUnion(completedChallenge),
-            'progress.totalXP': (await getUserProfile(userId))?.progress?.totalXP || 0 + reward.xp,
             updatedAt: serverTimestamp()
         });
 
+        // Award XP using the xpService (handles leveling automatically)
+        const xpResult = await addXP(userId, reward.xp, 'DAILY_CHALLENGE');
+
         console.log('✅ Challenge marked as completed:', challengeId);
+        console.log(`⭐ XP awarded: +${reward.xp} (Total: ${xpResult.newTotal})`);
+
+        if (xpResult.leveledUp) {
+            console.log(`🎉 Level up! Now level ${xpResult.newLevelNum}`);
+        }
+
+        return xpResult;
 
     } catch (error) {
         console.error('❌ Error marking challenge completed:', error);

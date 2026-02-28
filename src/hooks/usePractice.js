@@ -30,7 +30,7 @@ export function usePractice() {
     const initialLetter = searchParams.get('letter')?.toUpperCase() || 'A';
 
     // Auth store
-    const { user } = useAuthStore();
+    const { user, refreshUserData } = useAuthStore();
 
     // State
     const [targetLetter, setTargetLetterState] = useState(initialLetter);
@@ -40,6 +40,7 @@ export function usePractice() {
     const [sessionHistory, setSessionHistory] = useState([]);
     const [isSessionActive, setIsSessionActive] = useState(false);
     const [newlyUnlockedAchievements, setNewlyUnlockedAchievements] = useState([]);
+    const [lastXPResult, setLastXPResult] = useState(null);
 
     /**
      * Set target letter and update URL
@@ -141,24 +142,34 @@ export function usePractice() {
     const handleCorrectSign = useCallback(async (result) => {
         if (!user?.uid) {
             console.warn('⚠️ No user logged in, cannot save progress');
-            return;
+            return null;
         }
 
         console.log('✅ Processing correct sign...');
 
         try {
-            // Save practice session
-            await savePracticeSession(user.uid, {
+            // Save practice session (now returns XP result)
+            const practiceXPResult = await savePracticeSession(user.uid, {
                 sign: targetLetter,
                 accuracy: result.accuracy,
                 attempts: 1
             });
 
-            // Add learned sign (if first time)
-            const wasNew = await addLearnedSign(user.uid, targetLetter);
+            // Track XP result for level-up modal
+            if (practiceXPResult) {
+                setLastXPResult(practiceXPResult);
+            }
 
-            if (wasNew) {
+            // Add learned sign (if first time) - also returns XP result
+            const signResult = await addLearnedSign(user.uid, targetLetter);
+
+            if (signResult?.isNew) {
                 console.log(`🎉 New sign learned: ${targetLetter}`);
+
+                // If learning new sign caused level-up, track that too
+                if (signResult.xpResult) {
+                    setLastXPResult(signResult.xpResult);
+                }
 
                 // Log analytics event
                 if (analytics) {
@@ -192,8 +203,15 @@ export function usePractice() {
                     });
                 }
             }
+
+            // Refresh user data to update UI (level, XP, learned signs stats)
+            await refreshUserData();
+
+            // Return XP result for level-up modal handling
+            return practiceXPResult || signResult?.xpResult || null;
         } catch (error) {
             console.error('❌ Error saving correct sign:', error);
+            return null;
         }
     }, [user?.uid, targetLetter]);
 
@@ -271,6 +289,7 @@ export function usePractice() {
         newlyUnlockedAchievements,
         currentLetterIndex,
         totalLetters: alphabetSigns.length,
+        lastXPResult,
 
         // Actions
         setTargetLetter,
@@ -282,7 +301,8 @@ export function usePractice() {
         prevLetter,
         hasNextLetter,
         hasPrevLetter,
-        clearNewAchievements
+        clearNewAchievements,
+        clearLastXPResult: () => setLastXPResult(null)
     };
 }
 

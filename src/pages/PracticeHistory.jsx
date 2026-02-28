@@ -314,7 +314,7 @@ const PracticeHistory = () => {
                 <div className="flex items-center gap-4">
                     <Button
                         variant="ghost"
-                        onClick={() => navigate('/practice/menu')}
+                        onClick={() => navigate('/practice')}
                         leftIcon={<ArrowLeft className="w-4 h-4" />}
                     >
                         Back
@@ -376,7 +376,7 @@ const PracticeHistory = () => {
                             Clear Filters
                         </Button>
                     ) : (
-                        <Button variant="primary" onClick={() => navigate('/practice/menu')}>
+                        <Button variant="primary" onClick={() => navigate('/practice')}>
                             Start Practicing
                         </Button>
                     )}

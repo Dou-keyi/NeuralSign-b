@@ -24,7 +24,7 @@ const GoogleSignInButton = ({ onClick, isLoading: parentLoading, className }) =>
         setIsLoading(true);
         try {
             await onClick();
-        } catch (error) {
+        } catch {
             // Error handled by parent
         } finally {
             setIsLoading(false);

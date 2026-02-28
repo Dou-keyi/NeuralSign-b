@@ -88,6 +88,8 @@ const Profile = () => {
                                             src={user.photoURL}
                                             alt="Profile"
                                             className="w-full h-full rounded-full object-cover"
+                                            referrerPolicy="no-referrer"
+                                            onError={(e) => { e.target.style.display = 'none'; }}
                                         />
                                     ) : (
                                         <span className="text-3xl font-bold gradient-text">

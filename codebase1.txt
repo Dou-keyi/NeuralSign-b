@@ -1,0 +1,1377 @@
+﻿/**
+ * Sentence Builder Page
+ * FUSED VERSION: Guided Wizard + Free Flow Builder
+ * * NeuralSign - AI Sign Language Learning Platform
+ */
+
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+// eslint-disable-next-line no-unused-vars
+import { motion, AnimatePresence } from 'framer-motion';
+import {
+    MessageSquare, Sparkles, GraduationCap, Camera,
+    ChevronRight, ChevronLeft, ArrowLeft, BookOpen,
+    Trophy, Home, Hand, CheckCircle, X, CheckCircle2
+} from 'lucide-react';
+import useAuthStore from '@/store/authStore';
+import { savePracticedSentence, getUserProgress } from '@/services/database';
+import { analyzeSentenceToSigns, translateASLSequence } from '@/services/geminiService';
+import SentenceInput from '@/components/sentence/SentenceInput';
+import WordBreakdown from '@/components/sentence/WordBreakdown';
+import SignSequence from '@/components/sentence/SignSequence';
+import FullSentencePractice from '@/components/sentence/FullSentencePractice';
+import SavedSentences from '@/components/sentence/SavedSentences';
+import Button from '@/components/common/Button';
+
+import CameraFeed from '@/components/camera/CameraFeed';
+import { useHandDetection } from '@/hooks/useHandDetection';
+import { wordValidator } from '@/services/wordValidation';
+
+// ðŸš€ æ­£å¼å¼•å…¥é˜Ÿå‹çš„ 3D æ¨¡åž‹ç»„ä»¶ï¼
+import ModelViewer from '@/components/3d/ModelViewer';
+
+const STEPS = {
+    INPUT: 'input', BREAKDOWN: 'breakdown', LEARN: 'learn', PRACTICE: 'practice', COMPLETE: 'complete'
+};
+const STEP_CONFIG = [
+    { id: STEPS.INPUT, label: 'Input', icon: MessageSquare },
+    { id: STEPS.BREAKDOWN, label: 'Breakdown', icon: Sparkles },
+    { id: STEPS.LEARN, label: 'Learn', icon: GraduationCap },
+    { id: STEPS.PRACTICE, label: 'Practice', icon: Camera }
+];
+
+const ACTIVE_VOCABULARY = [
+    { id: 'i-me', englishText: 'I', isStatic: true },
+    { id: 'love', englishText: 'Love', isStatic: true },
+    { id: 'want', englishText: 'Want', isStatic: true }, 
+    { id: 'water', englishText: 'Water', isStatic: true },
+    { id: 'you', englishText: 'You', isStatic: true },
+    { id: 'yes', englishText: 'Yes', isStatic: true },
+    { id: 'no', englishText: 'No', isStatic: true }
+];
+
+// ============================================================================
+// ðŸŒŸ THE FREE FLOW BUILDER
+// ============================================================================
+const FreeFlowMode = () => {
+    const [sentence, setSentence] = useState([]);
+    const [bestMatch, setBestMatch] = useState(null); 
+    const [handPosition, setHandPosition] = useState({ x: 50, y: 50 }); 
+    const [dwellProgress, setDwellProgress] = useState(0);
+    const [isTranslating, setIsTranslating] = useState(false);
+    const [translationResult, setTranslationResult] = useState(null);
+    
+    // ç»ƒä¹ æ¨¡å¼çŠ¶æ€
+    const [practiceWord, setPracticeWord] = useState(null); 
+    const [practiceProgress, setPracticeProgress] = useState(0);
+    const [isPracticeSuccess, setIsPracticeSuccess] = useState(false);
+
+    const lockedWordRef = useRef(null);
+    const dwellStartTimeRef = useRef(null);
+
+    const {
+        videoRef, canvasRef, isDetecting, isCameraActive,
+        isCameraLoading, handDetected, detectionResult, startDetection, stopDetection
+    } = useHandDetection({}); 
+
+    useEffect(() => {
+        let frameId;
+
+        const processFrame = () => {
+            if (!isDetecting || !handDetected || !detectionResult?.landmarks) {
+                setBestMatch(null);
+                setDwellProgress(0);
+                setPracticeProgress(0);
+                dwellStartTimeRef.current = null;
+                lockedWordRef.current = null;
+                return;
+            }
+
+            const landmarks = detectionResult.landmarks;
+            const handedness = detectionResult.handedness || 'Right';
+
+            let minY = 1, meanX = 0;
+            landmarks.forEach(lm => {
+                if (lm.y < minY) minY = lm.y;
+                meanX += lm.x;
+            });
+            meanX = meanX / landmarks.length;
+            setHandPosition({ x: (1 - meanX) * 100, y: minY * 100 });
+
+            // ðŸŽ¯ ç»ƒä¹ æ¨¡å¼åˆ¤æ–­é€»è¾‘
+            if (practiceWord) {
+                if (isPracticeSuccess) return; 
+
+                const targetWordObj = ACTIVE_VOCABULARY.find(w => w.id === practiceWord.toLowerCase());
+                if (!targetWordObj) return;
+
+                const result = wordValidator.validateSign(targetWordObj, landmarks, handedness);
+
+                if (result.confidence > 0.80) {
+                    if (!dwellStartTimeRef.current) {
+                        dwellStartTimeRef.current = Date.now();
+                    } else {
+                        const elapsed = Date.now() - dwellStartTimeRef.current;
+                        const pProgress = Math.min(100, (elapsed / 1500) * 100); 
+                        setPracticeProgress(pProgress);
+
+                        if (pProgress === 100 && !isPracticeSuccess) {
+                            setIsPracticeSuccess(true);
+                            setTimeout(() => {
+                                setPracticeWord(null);
+                                setIsPracticeSuccess(false);
+                                setPracticeProgress(0);
+                            }, 2000); 
+                        }
+                    }
+                } else {
+                    setPracticeProgress(0);
+                    dwellStartTimeRef.current = null;
+                }
+                return; 
+            }
+
+            // ðŸ—£ï¸ è‡ªç”±ç»„å¥é›·è¾¾æ¨¡å¼
+            let highestScore = 0;
+            let topWord = null;
+
+            ACTIVE_VOCABULARY.forEach(word => {
+                const result = wordValidator.validateSign(word, landmarks, handedness);
+                if (result.confidence > highestScore) {
+                    highestScore = result.confidence;
+                    topWord = word;
+                }
+            });
+
+            const now = Date.now();
+            
+            if (highestScore > 0.75) {
+                const currentWordText = topWord.englishText;
+                setBestMatch(currentWordText); 
+
+                if (lockedWordRef.current !== currentWordText) {
+                    lockedWordRef.current = currentWordText;
+                    dwellStartTimeRef.current = now;
+                    setDwellProgress(0);
+                } else {
+                    const elapsed = now - dwellStartTimeRef.current;
+                    const progress = Math.min(100, (elapsed / 2000) * 100);
+                    setDwellProgress(progress);
+
+                    if (progress === 100) {
+                        setSentence(prev => [...prev, currentWordText]);
+                        dwellStartTimeRef.current = now + 1500; 
+                        setDwellProgress(0);
+                    }
+                }
+            } else {
+                setBestMatch("Thinking..."); 
+                setDwellProgress(0); 
+                lockedWordRef.current = null;
+                dwellStartTimeRef.current = null;
+            }
+        };
+
+        frameId = requestAnimationFrame(processFrame);
+        return () => cancelAnimationFrame(frameId);
+    }, [isDetecting, handDetected, detectionResult, practiceWord, isPracticeSuccess]);
+
+    useEffect(() => {
+        return () => stopDetection();
+    }, []);
+
+    const handleTranslate = async () => {
+        setIsTranslating(true);
+        try {
+            const result = await translateASLSequence(sentence);
+            setTranslationResult(result);
+        } catch (error) {
+            console.error("Translation failed", error);
+            setTranslationResult({
+                smoothEnglish: sentence.join(" "),
+                feedback: "API connection failed. Please check your internet or API key.",
+                missingSigns: []
+            });
+        } finally {
+            setIsTranslating(false);
+        }
+    };
+
+    const exitPracticeMode = () => {
+        setPracticeWord(null);
+        setIsPracticeSuccess(false);
+        setPracticeProgress(0);
+    };
+
+    return (
+        <div className="max-w-6xl mx-auto mt-6 relative px-2">
+            
+            {/* ç»ƒä¹ æ¨¡å¼é¡¶éƒ¨æ¨ªå¹… */}
+            <AnimatePresence>
+                {practiceWord && (
+                    <motion.div 
+                        initial={{ opacity: 0, y: -20, height: 0 }} animate={{ opacity: 1, y: 0, height: 'auto' }} exit={{ opacity: 0, y: -20, height: 0 }}
+                        className="glass-card p-4 flex justify-between items-center border border-primary/50 shadow-lg mb-6 rounded-2xl"
+                    >
+                        <div>
+                            <h2 className="text-xl font-bold text-white flex items-center gap-3">
+                                <Camera className="text-primary w-5 h-5" /> 
+                                Practice Mode: <span className="text-primary capitalize">{practiceWord}</span>
+                            </h2>
+                            <p className="text-dark-300 text-xs mt-1">Mirror the 3D block and hold for 1.5 seconds.</p>
+                        </div>
+                        <Button variant="outline" onClick={exitPracticeMode} leftIcon={<X className="w-4 h-4"/>}>
+                            Cancel Practice
+                        </Button>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* ðŸš€ ç»ˆæžå¸ƒå±€é˜²çˆ†è£‚è®¾è®¡ï¼šFlex Stretch + Min-H-0 */}
+            <div className={`flex flex-col ${practiceWord ? 'lg:flex-row items-stretch' : ''} gap-6 w-full transition-all duration-500`}>
+                
+                {/* å·¦ä¾§ï¼šæ‘„åƒå¤´åŒºåŸŸä¸»å¯¼é«˜åº¦ (flex-[2] ä»£è¡¨å çº¦ 66% å®½åº¦) */}
+                <div className={`relative glass-card p-2 rounded-2xl overflow-hidden shadow-2xl flex flex-col justify-center transition-all duration-500 ${practiceWord ? 'lg:flex-[2] shrink-0' : 'w-full'}`}>
+                    {/* aspect-video å¼ºåˆ¶é”å®š 16:9 çš„è§†é¢‘æ¯”ä¾‹ï¼Œè¿™æ˜¯æ•´ä¸ªå¸ƒå±€çš„é«˜åº¦åŸºå‡† */}
+                    <div className="relative w-full bg-dark-900 rounded-xl overflow-hidden aspect-video flex items-center justify-center">
+                        <CameraFeed
+                            videoRef={videoRef} canvasRef={canvasRef} isActive={isCameraActive}
+                            isLoading={isCameraLoading} isDetecting={isDetecting} handDetected={handDetected}
+                            onStart={startDetection} onStop={stopDetection} onRetry={startDetection}
+                        />
+
+                        {/* ç»„å¥é›·è¾¾ */}
+                        <AnimatePresence>
+                            {!practiceWord && handDetected && bestMatch && (
+                                <motion.div
+                                    initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }}
+                                    className="absolute pointer-events-none z-20 flex flex-col items-center"
+                                    style={{ left: `${handPosition.x}%`, top: `${Math.max(5, handPosition.y - 15)}%`, transform: 'translateX(-50%)' }}
+                                >
+                                    <div className="relative flex items-center justify-center">
+                                        <svg width="80" height="80" className="absolute -top-2 -left-2 rotate-[-90deg]">
+                                            <circle cx="40" cy="40" r="36" fill="none" stroke="rgba(99,102,241,0.2)" strokeWidth="6" />
+                                            <circle cx="40" cy="40" r="36" fill="none" stroke="#6366F1" strokeWidth="6" strokeDasharray="226" strokeDashoffset={226 - (226 * dwellProgress) / 100} />
+                                        </svg>
+                                        <div className="bg-dark-900/90 backdrop-blur-md px-4 py-2 rounded-full border border-primary/50 shadow-lg z-10">
+                                            <span className="text-white font-bold text-lg tracking-wider">{bestMatch}</span>
+                                        </div>
+                                    </div>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+
+                        {/* ç»ƒä¹ è¿›åº¦æ¡ */}
+                        <AnimatePresence>
+                            {practiceWord && !isPracticeSuccess && handDetected && (
+                                <motion.div 
+                                    initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }}
+                                    className="absolute bottom-6 left-1/2 -translate-x-1/2 z-20 w-64"
+                                >
+                                    <div className="bg-dark-900/95 backdrop-blur-md p-3 rounded-xl border border-primary/40 shadow-xl flex flex-col items-center">
+                                        <span className="text-xs font-bold text-primary mb-2 uppercase tracking-widest">
+                                            {practiceProgress > 0 ? "Hold it steady..." : "Scanning Sign..."}
+                                        </span>
+                                        <div className="w-full h-2 bg-dark-800 rounded-full overflow-hidden border border-dark-700">
+                                            <div 
+                                                className="h-full bg-gradient-to-r from-primary to-secondary transition-all duration-100 ease-linear"
+                                                style={{ width: `${practiceProgress}%` }}
+                                            />
+                                        </div>
+                                    </div>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+
+                        {/* æˆåŠŸå¤§æ»¡è´¯ */}
+                        <AnimatePresence>
+                            {practiceWord && isPracticeSuccess && (
+                                <motion.div 
+                                    initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
+                                    className="absolute inset-0 z-30 bg-success/20 backdrop-blur-md flex flex-col items-center justify-center"
+                                >
+                                    <motion.div 
+                                        initial={{ scale: 0, rotate: -180 }} animate={{ scale: 1, rotate: 0 }} transition={{ type: "spring" }}
+                                        className="bg-dark-900 p-6 rounded-full border-4 border-success shadow-[0_0_60px_rgba(34,197,94,0.6)] mb-4"
+                                    >
+                                        <CheckCircle2 className="w-16 h-16 text-success" />
+                                    </motion.div>
+                                    <h1 className="text-5xl font-extrabold text-white drop-shadow-xl mb-2">Perfect!</h1>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+                        
+                        {!isCameraActive && !isCameraLoading && (
+                            <div className="absolute inset-0 z-40 flex items-center justify-center bg-dark-900/80 backdrop-blur-sm">
+                                <Button variant="primary" onClick={startDetection} rightIcon={<Camera className="w-5 h-5" />}>
+                                    Turn On Camera to Start
+                                </Button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                {/* å³ä¾§ï¼šé˜Ÿå‹çš„ 3D æ¨¡åž‹åŒºåŸŸ (flex-[1] ä»£è¡¨å  33% å®½åº¦ï¼Œä¸”é«˜åº¦è¢«å¼ºåˆ¶æ‹‰å¹³) */}
+                <AnimatePresence>
+                    {practiceWord && (
+                        <motion.div 
+                            initial={{ opacity: 0, x: 20, width: 0 }} 
+                            animate={{ opacity: 1, x: 0, width: 'auto' }} 
+                            exit={{ opacity: 0, x: 20, width: 0 }}
+                            className="lg:flex-[1] w-full flex flex-col min-w-[280px]"
+                        >
+                            <div className="glass-card flex-1 flex flex-col border border-dark-600 shadow-2xl rounded-2xl bg-dark-800/80 overflow-hidden relative">
+                                
+                                {/* æ ‡é¢˜æ  */}
+                                <div className="p-4 border-b border-dark-700 shrink-0 bg-dark-900/40">
+                                    <h3 className="text-xs font-bold text-dark-400 uppercase tracking-widest flex items-center gap-2">
+                                        <Sparkles className="w-4 h-4 text-primary" /> 3D Reference
+                                    </h3>
+                                </div>
+                                
+                                {/* æ ¸å¿ƒé»‘é­”æ³•ï¼šmin-h-0 å¼ºåˆ¶å†…éƒ¨ç»„ä»¶(ModelViewer)æ”¶ç¼©ï¼Œç»ä¸æ’‘å¤§å¤–å±‚ */}
+                                <div className="flex-1 min-h-0 p-4 flex flex-col items-center justify-center relative">
+                                    <div className="w-full flex-1 relative flex items-center justify-center min-h-0">
+                                        {/* é˜Ÿå‹çš„ ModelViewerï¼Œå°±ç®—å®ƒæŠ¥é”™ï¼Œä¹Ÿåªä¼šåœ¨è¿™ä¸ªæ¡†é‡ŒæŠ¥é”™ï¼Œä¸ä¼šå½±å“æ•´ä½“å¸ƒå±€ */}
+                                        <ModelViewer 
+                                            letter={practiceWord.charAt(0).toUpperCase()} 
+                                        />
+                                    </div>
+                                    
+                                    {/* åº•éƒ¨æ–‡å­— */}
+                                    <div className="text-center shrink-0 w-full mt-2 bg-dark-900/60 py-3 rounded-xl border border-dark-700/50 backdrop-blur-sm">
+                                        <p className="text-2xl font-black text-white capitalize tracking-wide drop-shadow-md">{practiceWord}</p>
+                                        <p className="text-xs text-primary mt-1 opacity-80">Target Sign</p>
+                                    </div>
+                                </div>
+
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+            </div>
+
+            {/* åº•éƒ¨ï¼šSentence Dock */}
+            <AnimatePresence>
+                {!practiceWord && (
+                    <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }}>
+                        <div className="glass-card p-6 border border-dark-700 min-h-[120px] flex flex-col relative mt-6 rounded-2xl">
+                            <div className="flex justify-between items-center mb-4">
+                                <h3 className="text-sm font-medium text-dark-300 uppercase tracking-wider">Your Sentence</h3>
+                                <Button variant="outline" className="py-1 px-3 text-xs" onClick={() => { setSentence([]); setTranslationResult(null); }}>
+                                    Clear
+                                </Button>
+                            </div>
+                            
+                            <div className="flex-1 flex items-center gap-2 flex-wrap mb-4 bg-dark-800/50 p-4 rounded-xl border border-dark-600 shadow-inner">
+                                {sentence.length === 0 ? (
+                                    <p className="text-dark-500 italic w-full text-center py-2">No words captured yet. Sign continuously to build...</p>
+                                ) : (
+                                    sentence.map((word, idx) => (
+                                        <motion.div key={idx} initial={{ scale: 0, x: -20 }} animate={{ scale: 1, x: 0 }}
+                                            className="bg-primary border border-primary-light px-4 py-2 rounded-lg text-white font-bold shadow-lg"
+                                        >
+                                            {word}
+                                        </motion.div>
+                                    ))
+                                )}
+                            </div>
+
+                            {sentence.length > 0 && !translationResult && (
+                                <Button variant="secondary" className="w-full shadow-lg hover:shadow-primary/20" onClick={handleTranslate} isLoading={isTranslating} rightIcon={<Sparkles className="w-4 h-4"/>}>
+                                    Translate & Check Grammar
+                                </Button>
+                            )}
+                        </div>
+
+                        {/* Gemini åé¦ˆä¸Žç»ƒä¹ æŽ¨è */}
+                        {translationResult && (
+                            <motion.div 
+                                initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
+                                className="glass-card p-6 border border-success/50 bg-gradient-to-br from-success/10 to-transparent mt-4 shadow-2xl rounded-2xl"
+                            >
+                                <div className="flex items-start gap-4">
+                                    <CheckCircle className="w-6 h-6 text-success shrink-0 mt-1 drop-shadow" />
+                                    <div className="flex-1">
+                                        <h4 className="text-sm text-dark-300 uppercase tracking-wider mb-1">Smooth English</h4>
+                                        <p className="text-2xl font-bold text-white mb-4">{translationResult.smoothEnglish}</p>
+                                        
+                                        <h4 className="text-sm text-dark-300 uppercase tracking-wider mb-1">ASL Grammar Feedback</h4>
+                                        <p className="text-dark-100 mb-6 leading-relaxed">{translationResult.feedback}</p>
+
+                                        {translationResult.missingSigns && translationResult.missingSigns.length > 0 && (
+                                            <div className="border-t border-success/20 pt-5">
+                                                <h4 className="text-sm font-bold text-warning uppercase tracking-wider mb-4 flex items-center gap-2 drop-shadow">
+                                                    <Sparkles className="w-5 h-5" /> Practice Missing Signs:
+                                                </h4>
+                                                <div className="flex flex-wrap gap-4">
+                                                    {translationResult.missingSigns.slice(0, 2).map((sign, idx) => (
+                                                        <div 
+                                                            key={idx} 
+                                                            onClick={() => setPracticeWord(sign)} 
+                                                            className="group flex items-center gap-4 bg-dark-800 p-4 rounded-2xl border-2 border-dark-600 hover:border-primary cursor-pointer transition-all hover:scale-105 shadow-xl hover:shadow-primary/30"
+                                                        >
+                                                            <div className="w-20 h-20 rounded-xl bg-dark-900 border border-primary/20 flex items-center justify-center relative overflow-hidden group-hover:bg-primary/5 transition-colors">
+                                                                <Hand className="w-10 h-10 text-primary/20 absolute z-0" />
+                                                                <svg className="absolute inset-0 w-full h-full z-10 drop-shadow-md" viewBox="0 0 100 100">
+                                                                    <path d="M50 90 L30 50 M50 90 L45 45 M50 90 L60 45 M50 90 L75 50" stroke="rgba(99, 102, 241, 0.4)" strokeWidth="2" fill="none"/>
+                                                                    <path d="M30 50 L20 30 L15 15 M45 45 L40 20 L35 10 M60 45 L65 20 L70 10 M75 50 L85 30 L90 15" stroke="rgba(139, 92, 246, 0.6)" strokeWidth="2" fill="none"/>
+                                                                    <circle cx="50" cy="90" r="3" fill="#EC4899"/>
+                                                                    <circle cx="30" cy="50" r="2.5" fill="#8B5CF6"/> <circle cx="20" cy="30" r="2" fill="#8B5CF6"/> <circle cx="15" cy="15" r="2.5" fill="#6366F1"/>
+                                                                    <circle cx="45" cy="45" r="2.5" fill="#8B5CF6"/> <circle cx="40" cy="20" r="2" fill="#8B5CF6"/> <circle cx="35" cy="10" r="2.5" fill="#6366F1"/>
+                                                                    <circle cx="60" cy="45" r="2.5" fill="#8B5CF6"/> <circle cx="65" cy="20" r="2" fill="#8B5CF6"/> <circle cx="70" cy="10" r="2.5" fill="#6366F1"/>
+                                                                    <circle cx="75" cy="50" r="2.5" fill="#8B5CF6"/> <circle cx="85" cy="30" r="2" fill="#8B5CF6"/> <circle cx="90" cy="15" r="2.5" fill="#6366F1"/>
+                                                                </svg>
+                                                            </div>
+                                                            <div>
+                                                                <p className="text-white font-extrabold text-2xl capitalize tracking-wide group-hover:text-primary transition-colors">{sign}</p>
+                                                                <p className="text-sm text-primary mt-1 flex items-center gap-1 opacity-80 group-hover:opacity-100 font-medium">
+                                                                    <Camera className="w-4 h-4"/> Click to practice
+                                                                </p>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            </motion.div>
+                        )}
+                    </motion.div>
+                )}
+            </AnimatePresence>
+        </div>
+    );
+};
+
+// ============================================================================
+// ðŸ‘‘ MAIN PAGE EXPORT
+// ============================================================================
+const SentenceBuilder = () => {
+    const [mode, setMode] = useState('freeflow'); 
+    const { user } = useAuthStore();
+
+    const [currentStep, setCurrentStep] = useState(STEPS.INPUT);
+    const [sentenceData, setSentenceData] = useState({ original: '', aslWords: [], explanation: '' });
+    const [currentWordIndex, setCurrentWordIndex] = useState(0);
+    
+    // eslint-disable-next-line no-unused-vars
+    const [learnMode, setLearnMode] = useState('sequence'); 
+    // eslint-disable-next-line no-unused-vars
+    const [practiceResults, setPracticeResults] = useState(null);
+    
+    const [savedSentences, setSavedSentences] = useState([]);
+    const [showSavedSentences, setShowSavedSentences] = useState(false);
+    const [isTranslating, setIsTranslating] = useState(false);
+    const [isSaving, setIsSaving] = useState(false);
+
+    useEffect(() => {
+        const loadSentences = async () => {
+            if (user?.uid) {
+                try {
+                    const progress = await getUserProgress(user.uid);
+                    if (progress?.practicedSentences) setSavedSentences(progress.practicedSentences);
+                } catch (error) { console.error(error); }
+            }
+        };
+        loadSentences();
+    }, [user?.uid]);
+
+    const handleSentenceSubmit = useCallback(async (sentence) => {
+        setIsTranslating(true);
+        try {
+            const result = await analyzeSentenceToSigns(sentence);
+            setSentenceData({ original: result.original || sentence, aslWords: result.aslWords || [], explanation: result.explanation || '' });
+            setCurrentStep(STEPS.BREAKDOWN);
+        } catch (error) { console.error(error); } finally { setIsTranslating(false); }
+    }, []);
+
+    const handleWordClick = useCallback((word, index) => { setCurrentWordIndex(index); setCurrentStep(STEPS.LEARN); }, []);
+    const handleWordSelect = useCallback((word, index) => { setCurrentWordIndex(index); }, []);
+
+    const handlePracticeComplete = useCallback(async (results) => {
+        setPracticeResults(results); setCurrentStep(STEPS.COMPLETE);
+        if (user?.uid) {
+            setIsSaving(true);
+            try {
+                const sentenceRecord = { id: Date.now().toString(), original: sentenceData.original, aslWords: sentenceData.aslWords, accuracy: results.averageAccuracy, duration: results.duration, completedAt: Date.now() };
+                await savePracticedSentence(user.uid, sentenceRecord);
+                setSavedSentences(prev => [sentenceRecord, ...prev]);
+            } catch (error) { console.error(error); } finally { setIsSaving(false); }
+        }
+    }, [user?.uid, sentenceData]);
+
+    const handlePracticeExit = useCallback(() => {
+        setCurrentStep(STEPS.INPUT); setSentenceData({ original: '', aslWords: [], explanation: '' });
+        setCurrentWordIndex(0); setPracticeResults(null);
+    }, []);
+
+    const handlePracticeSaved = useCallback((sentence) => {
+        setSentenceData({ original: sentence.original, aslWords: sentence.aslWords, explanation: '' });
+        setShowSavedSentences(false); setCurrentStep(STEPS.BREAKDOWN);
+    }, []);
+
+    const handleDeleteSentence = useCallback((id) => { setSavedSentences(prev => prev.filter(s => s.id !== id)); }, []);
+
+    const goToNextStep = useCallback(() => {
+        const stepOrder = [STEPS.INPUT, STEPS.BREAKDOWN, STEPS.LEARN, STEPS.PRACTICE];
+        const currentIndex = stepOrder.indexOf(currentStep);
+        if (currentIndex < stepOrder.length - 1) setCurrentStep(stepOrder[currentIndex + 1]);
+    }, [currentStep]);
+
+    const goToPrevStep = useCallback(() => {
+        const stepOrder = [STEPS.INPUT, STEPS.BREAKDOWN, STEPS.LEARN, STEPS.PRACTICE];
+        const currentIndex = stepOrder.indexOf(currentStep);
+        if (currentIndex > 0) setCurrentStep(stepOrder[currentIndex - 1]);
+    }, [currentStep]);
+
+    const getStepIndex = (step) => STEP_CONFIG.findIndex(s => s.id === step);
+
+    return (
+        <div className="min-h-screen bg-dark-900 pt-20 pb-12 px-4">
+            <div className="max-w-6xl mx-auto">
+                <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="text-center mb-8">
+                    <h1 className="text-4xl font-bold bg-gradient-to-r from-primary via-secondary to-accent bg-clip-text text-transparent mb-3">
+                        Sentence Builder
+                    </h1>
+                    <p className="text-dark-400 text-lg max-w-xl mx-auto mb-6">
+                        Build sentences using sign language or learn pre-written ASL phrases.
+                    </p>
+                    
+                    <div className="inline-flex bg-dark-800 p-1 rounded-xl border border-dark-700 shadow-inner">
+                        <button onClick={() => setMode('freeflow')} className={`flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-medium transition-all ${mode === 'freeflow' ? 'bg-primary text-white shadow-lg' : 'text-dark-400 hover:text-white hover:bg-dark-700'}`}>
+                            <Hand className="w-4 h-4" /> Free Sign
+                        </button>
+                        <button onClick={() => setMode('guided')} className={`flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-medium transition-all ${mode === 'guided' ? 'bg-primary text-white shadow-lg' : 'text-dark-400 hover:text-white hover:bg-dark-700'}`}>
+                            <BookOpen className="w-4 h-4" /> Guided 
+                        </button>
+                    </div>
+                </motion.div>
+
+                {mode === 'freeflow' ? <FreeFlowMode /> : (
+                    <div className="mt-8 max-w-4xl mx-auto">
+                        {currentStep === STEPS.INPUT && (
+                            <div className="text-center mb-6">
+                                <button onClick={() => setShowSavedSentences(!showSavedSentences)} className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-dark-700/50 text-dark-300 hover:bg-dark-700 transition-colors">
+                                    <BookOpen className="w-4 h-4" /> {showSavedSentences ? 'New Sentence' : `My Sentences (${savedSentences.length})`}
+                                </button>
+                            </div>
+                        )}
+                        {currentStep !== STEPS.COMPLETE && !showSavedSentences && (
+                            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mb-8">
+                                <div className="flex items-center justify-center gap-2 md:gap-4">
+                                    {STEP_CONFIG.map((step, index) => {
+                                        const Icon = step.icon; const isActive = step.id === currentStep; const isCompleted = getStepIndex(currentStep) > index;
+                                        return (
+                                            <div key={step.id} className="flex items-center">
+                                                <div className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-all ${isActive ? 'bg-primary/20 text-primary' : isCompleted ? 'bg-success/20 text-success' : 'bg-dark-700/50 text-dark-400'}`}>
+                                                    <Icon className="w-5 h-5" /> <span className="hidden md:inline text-sm font-medium">{step.label}</span>
+                                                </div>
+                                                {index < STEP_CONFIG.length - 1 && <ChevronRight className="w-5 h-5 text-dark-500 mx-1" />}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </motion.div>
+                        )}
+
+                        <AnimatePresence mode="wait">
+                            {/* The rest of the guided mode code remains exactly the same */}
+                            {showSavedSentences && currentStep === STEPS.INPUT && (
+                                <motion.div key="saved" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}>
+                                    <SavedSentences sentences={savedSentences} onPractice={handlePracticeSaved} onDelete={handleDeleteSentence} />
+                                </motion.div>
+                            )}
+                            {currentStep === STEPS.INPUT && !showSavedSentences && (
+                                <motion.div key="input" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}>
+                                    <SentenceInput onSentenceSubmit={handleSentenceSubmit} isLoading={isTranslating} />
+                                </motion.div>
+                            )}
+                            {currentStep === STEPS.BREAKDOWN && (
+                                <motion.div key="breakdown" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="space-y-6">
+                                    <WordBreakdown original={sentenceData.original} aslWords={sentenceData.aslWords} explanation={sentenceData.explanation} onWordClick={handleWordClick} />
+                                    <div className="flex flex-wrap gap-4 justify-between">
+                                        <Button variant="outline" onClick={() => setCurrentStep(STEPS.INPUT)} leftIcon={<ChevronLeft className="w-4 h-4" />}>New Sentence</Button>
+                                        <div className="flex gap-3">
+                                            <Button variant="secondary" onClick={() => { setLearnMode('sequence'); goToNextStep(); }} leftIcon={<GraduationCap className="w-4 h-4" />}>Watch Sequence</Button>
+                                            <Button variant="primary" onClick={() => { setLearnMode('practice'); setCurrentStep(STEPS.PRACTICE); }} leftIcon={<Camera className="w-4 h-4" />}>Start Practice</Button>
+                                        </div>
+                                    </div>
+                                </motion.div>
+                            )}
+                            {currentStep === STEPS.LEARN && (
+                                <motion.div key="learn" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="space-y-6">
+                                    <SignSequence words={sentenceData.aslWords} currentWordIndex={currentWordIndex} onWordSelect={handleWordSelect} />
+                                    <div className="flex flex-wrap gap-4 justify-between">
+                                        <Button variant="outline" onClick={goToPrevStep} leftIcon={<ChevronLeft className="w-4 h-4" />}>Back to Breakdown</Button>
+                                        <Button variant="primary" onClick={goToNextStep} rightIcon={<ChevronRight className="w-4 h-4" />}>Start Practice</Button>
+                                    </div>
+                                </motion.div>
+                            )}
+                            {currentStep === STEPS.PRACTICE && (
+                                <motion.div key="practice" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}>
+                                    <FullSentencePractice sentence={sentenceData.original} words={sentenceData.aslWords} onComplete={handlePracticeComplete} onExit={handlePracticeExit} />
+                                </motion.div>
+                            )}
+                            {currentStep === STEPS.COMPLETE && (
+                                <motion.div key="complete" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="glass-card p-8 text-center">
+                                    <motion.div initial={{ scale: 0, rotate: -180 }} animate={{ scale: 1, rotate: 0 }} transition={{ type: 'spring', delay: 0.2 }} className="mb-6">
+                                        <div className="inline-flex p-6 rounded-full bg-gradient-to-br from-warning/20 to-secondary/20"><Trophy className="w-20 h-20 text-warning" /></div>
+                                    </motion.div>
+                                    <h2 className="text-3xl font-bold text-dark-100 mb-2">Sentence Completed!</h2>
+                                    <p className="text-xl text-dark-300 mb-8">"{sentenceData.original}"</p>
+                                    {isSaving && <p className="text-sm text-dark-400 mb-4">Saving your progress...</p>}
+                                    <div className="flex flex-wrap justify-center gap-4">
+                                        <Button variant="outline" onClick={() => { setCurrentStep(STEPS.BREAKDOWN); setPracticeResults(null); }} leftIcon={<ArrowLeft className="w-4 h-4" />}>Practice Again</Button>
+                                        <Button variant="primary" onClick={handlePracticeExit} leftIcon={<Home className="w-4 h-4" />}>New Sentence</Button>
+                                    </div>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
+
+export default SentenceBuilder;
+/**
+ * HandModel3D Component
+ * Core 3D model viewer using @react-three/fiber and @react-three/drei
+ * Loads GLTF models and provides interactive viewing experience
+ */
+
+import React, { Suspense, useRef, useState, useEffect, useCallback, memo } from 'react';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { OrbitControls, useGLTF, Center, Environment } from '@react-three/drei';
+import * as THREE from 'three';
+
+// ============================================
+// PLACEHOLDER MODEL
+// ============================================
+
+/**
+ * PlaceholderModel Component
+ * Displays when real 3D model is not available
+ */
+
+/* eslint-disable no-unused-vars */
+const PlaceholderModel = memo(({ letter, color = '#6366F1' }) => {
+    const meshRef = useRef();
+
+    // Gentle rotation animation
+    useFrame((state) => {
+        if (meshRef.current) {
+            meshRef.current.rotation.y = Math.sin(state.clock.elapsedTime * 0.5) * 0.3;
+        }
+    });
+
+    // Create a simple box with the letter as texture
+    return (
+        <group ref={meshRef}>
+            {/* Main cube representing the hand placeholder */}
+            <mesh castShadow receiveShadow>
+                <boxGeometry args={[1.5, 1.5, 1.5]} />
+                <meshStandardMaterial
+                    color={color}
+                    roughness={0.4}
+                    metalness={0.3}
+                />
+            </mesh>
+
+            {/* Letter display on front face */}
+            <mesh position={[0, 0, 0.76]}>
+                <planeGeometry args={[1.2, 1.2]} />
+                <meshBasicMaterial color="#1E293B" />
+            </mesh>
+
+            {/* Decorative ring */}
+            <mesh rotation={[Math.PI / 2, 0, 0]}>
+                <torusGeometry args={[1.2, 0.05, 16, 100]} />
+                <meshStandardMaterial
+                    color="#8B5CF6"
+                    emissive="#8B5CF6"
+                    emissiveIntensity={0.2}
+                />
+            </mesh>
+        </group>
+    );
+});
+
+PlaceholderModel.displayName = 'PlaceholderModel';
+
+// ============================================
+// GLTF MODEL LOADER
+// ============================================
+
+/**
+ * GLTFModel Component
+ * Loads and displays GLTF model from path
+ * Uses useGLTF which automatically suspends during loading
+ */
+const GLTFModel = memo(({ modelPath, scale = 1, onLoad }) => {
+    // useGLTF suspends while loading (handled by Suspense in parent)
+    // Enable draco decoder from CDN for compressed models
+    const { scene } = useGLTF(modelPath, true);
+    // Clone the scene to avoid mutating the cached object
+    // usage of useMemo ensures we only clone when the scene or path changes
+    const clonedScene = React.useMemo(() => scene.clone(true), [scene]);
+
+    const modelRef = useRef();
+    const hasCalledOnLoad = useRef(false);
+
+    // Apply materials and shadows, and normalize scale on load
+    useEffect(() => {
+        if (clonedScene && !hasCalledOnLoad.current) {
+            hasCalledOnLoad.current = true;
+
+            // Calculate bounding box to normalize model size
+            const box = new THREE.Box3().setFromObject(clonedScene);
+            const size = box.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z);
+
+            // Normalize to fit in a 2x2x2 box
+            const normalizeScale = maxDim > 0 ? 2 / maxDim : 1;
+            clonedScene.scale.setScalar(normalizeScale * scale);
+
+            // Center the model
+            const center = box.getCenter(new THREE.Vector3());
+            clonedScene.position.sub(center.multiplyScalar(normalizeScale * scale));
+
+            // Apply materials and shadows to all meshes
+            clonedScene.traverse((child) => {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                    if (child.material) {
+                        child.material.roughness = 0.5;
+                        child.material.metalness = 0.2;
+                    }
+                }
+            });
+
+            console.log('âœ… Model loaded and normalized:', modelPath, 'scale:', normalizeScale);
+            onLoad?.();
+        }
+    }, [clonedScene, scale, modelPath, onLoad]);
+
+    if (!clonedScene) {
+        return null;
+    }
+
+    return (
+        <group ref={modelRef}>
+            <primitive object={clonedScene} />
+        </group>
+    );
+});
+
+GLTFModel.displayName = 'GLTFModel';
+
+// ============================================
+// ERROR BOUNDARY FOR 3D MODELS
+// ============================================
+
+/**
+ * Simple Error Boundary for catching model loading errors
+ */
+class ModelErrorBoundary extends React.Component {
+    constructor(props) {
+        super(props);
+        this.state = { hasError: false, error: null };
+    }
+
+    static getDerivedStateFromError(error) {
+        return { hasError: true, error };
+    }
+
+    // eslint-disable-next-line no-unused-vars
+    componentDidCatch(error, errorInfo) {
+        console.log('Model loading error caught:', error);
+        this.props.onError?.(error);
+    }
+
+    render() {
+        if (this.state.hasError) {
+            return this.props.fallback || null;
+        }
+        return this.props.children;
+    }
+}
+
+// ============================================
+// MODEL CONTENT (Inner Canvas Component)
+// ============================================
+
+/**
+ * ModelContent Component
+ * Handles the actual 3D scene content
+ */
+const ModelContent = memo(({
+    modelPath,
+    letter,
+    scale = 1,
+    autoRotate = false,
+    onLoad,
+    onError,
+    controlsRef
+}) => {
+    const [modelFailed, setModelFailed] = useState(false);
+    const pendingErrorRef = useRef(null);
+    const { camera } = useThree();
+
+    // Reset camera position
+    useEffect(() => {
+        camera.position.set(0, 0, 5);
+        camera.lookAt(0, 0, 0);
+        // eslint-disable-next-line no-unused-vars
+        const trigger = letter; // Dummy use to satisfy linter
+    }, [camera, letter]);
+
+    // Handle model error with deferred state update to avoid setState during render
+    const handleModelError = useCallback((error) => {
+        // Store the error to be processed in useEffect
+        pendingErrorRef.current = error;
+    }, []);
+
+    // Process pending error in useEffect to avoid setState during render
+    useEffect(() => {
+        if (pendingErrorRef.current && !modelFailed) {
+            console.log('Model failed to load, using placeholder:', pendingErrorRef.current);
+            // Defers state update to next tick to prevent cascading render warnings
+            setTimeout(() => {
+                setModelFailed(true);
+                onError?.(pendingErrorRef.current);
+                pendingErrorRef.current = null;
+            }, 0);
+        }
+    });
+
+    // Reset error state when model changes
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            setModelFailed(false);
+            pendingErrorRef.current = null;
+        }, 0);
+        return () => clearTimeout(timer);
+    }, [modelPath, letter]);
+
+    // Letter-based color palette
+    const letterColors = {
+        A: '#6366F1', B: '#8B5CF6', C: '#EC4899', D: '#10B981',
+        E: '#F59E0B', F: '#EF4444', G: '#6366F1', H: '#8B5CF6',
+        I: '#EC4899', J: '#10B981', K: '#F59E0B', L: '#EF4444',
+        M: '#6366F1', N: '#8B5CF6', O: '#EC4899', P: '#10B981',
+        Q: '#F59E0B', R: '#EF4444', S: '#6366F1', T: '#8B5CF6',
+        U: '#EC4899', V: '#10B981', W: '#F59E0B', X: '#EF4444',
+        Y: '#6366F1', Z: '#8B5CF6',
+    };
+
+    return (
+        <>
+            {/* Lighting Setup */}
+            <ambientLight intensity={0.5} />
+            <directionalLight
+                position={[5, 5, 5]}
+                intensity={1}
+                castShadow
+                shadow-mapSize-width={1024}
+                shadow-mapSize-height={1024}
+            />
+            <directionalLight
+                position={[-5, 3, -5]}
+                intensity={0.5}
+            />
+            <directionalLight
+                position={[0, -5, 0]}
+                intensity={0.3}
+            />
+
+            {/* Environment for reflections */}
+            <Environment preset="city" />
+
+            {/* Model or Placeholder */}
+            {modelPath && !modelFailed ? (
+                <ModelErrorBoundary
+                    onError={handleModelError}
+                    fallback={<PlaceholderModel letter={letter} color={letterColors[letter] || '#6366F1'} />}
+                >
+                    <Suspense fallback={<PlaceholderModel letter={letter} color={letterColors[letter] || '#6366F1'} />}>
+                        <GLTFModel
+                            modelPath={modelPath}
+                            scale={scale}
+                            onLoad={onLoad}
+                        />
+                    </Suspense>
+                </ModelErrorBoundary>
+            ) : (
+                <PlaceholderModel letter={letter} color={letterColors[letter] || '#6366F1'} />
+            )}
+
+            {/* OrbitControls */}
+            <OrbitControls
+                ref={controlsRef}
+                enableRotate={true}
+                enableZoom={true}
+                enablePan={false}
+                minDistance={2}
+                maxDistance={10}
+                enableDamping={true}
+                dampingFactor={0.05}
+                autoRotate={autoRotate}
+                autoRotateSpeed={2}
+            />
+        </>
+    );
+});
+
+ModelContent.displayName = 'ModelContent';
+
+// ============================================
+// MAIN COMPONENT
+// ============================================
+
+/**
+ * HandModel3D Component
+ * Complete 3D model viewer with Canvas setup
+ * 
+ * @param {string} modelPath - Path to GLTF model file
+ * @param {string} letter - Letter being displayed (for placeholder)
+ * @param {number} scale - Model scale (default: 1)
+ * @param {boolean} autoRotate - Enable auto-rotation
+ * @param {function} onLoad - Callback when model loads
+ * @param {function} onError - Callback on error
+ * @param {object} controlsRef - Ref for OrbitControls
+ */
+const HandModel3D = memo(({
+    modelPath,
+    letter = 'A',
+    scale = 1,
+    autoRotate = false,
+    onLoad,
+    onError,
+    controlsRef,
+    className = '',
+}) => {
+    return (
+        <div className={`w-full h-full ${className}`}>
+            <Canvas
+                camera={{
+                    position: [0, 0, 5],
+                    fov: 50,
+                    near: 0.1,
+                    far: 1000,
+                }}
+                shadows
+                gl={{
+                    antialias: true,
+                    alpha: true,
+                    powerPreference: 'high-performance',
+                }}
+                dpr={[1, 2]}
+            >
+                <color attach="background" args={['#1E293B']} />
+                <ModelContent
+                    modelPath={modelPath}
+                    letter={letter}
+                    scale={scale}
+                    autoRotate={autoRotate}
+                    onLoad={onLoad}
+                    onError={onError}
+                    controlsRef={controlsRef}
+                />
+            </Canvas>
+        </div>
+    );
+});
+
+HandModel3D.displayName = 'HandModel3D';
+
+export default HandModel3D;
+/**
+ * ModelControls Component
+ * Toolbar with control buttons for the 3D viewer
+ */
+
+import { memo } from 'react';
+import { motion } from 'framer-motion';
+import {
+    RotateCcw,
+    RefreshCw,
+    ZoomIn,
+    ZoomOut,
+    Maximize2,
+    Pause,
+    Play
+} from 'lucide-react';
+
+/**
+ * Control Button Component
+ * Individual button with tooltip
+ */
+const ControlButton = memo(({
+    onClick,
+    icon: Icon,
+    label,
+    isActive = false,
+    disabled = false
+}) => (
+    <motion.button
+        whileHover={{ scale: disabled ? 1 : 1.05 }}
+        whileTap={{ scale: disabled ? 1 : 0.95 }}
+        onClick={onClick}
+        disabled={disabled}
+        className={`
+      relative group p-2.5 rounded-lg transition-all duration-200
+      ${isActive
+                ? 'bg-primary text-white shadow-lg shadow-primary/25'
+                : 'bg-dark-700 text-dark-300 hover:bg-dark-600 hover:text-dark-100'
+            }
+      ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+    `}
+        aria-label={label}
+        title={label}
+    >
+        <Icon className="w-4 h-4" />
+
+        {/* Tooltip */}
+        <span className="
+      absolute bottom-full left-1/2 -translate-x-1/2 mb-2
+      px-2 py-1 text-xs text-white bg-dark-900 rounded
+      opacity-0 group-hover:opacity-100 transition-opacity
+      whitespace-nowrap pointer-events-none z-10
+    ">
+            {label}
+        </span>
+    </motion.button>
+));
+
+ControlButton.displayName = 'ControlButton';
+
+/**
+ * ModelControls Component
+ * 
+ * @param {function} onResetView - Reset camera to default position
+ * @param {function} onToggleAutoRotate - Toggle auto-rotation
+ * @param {function} onZoomIn - Zoom camera in
+ * @param {function} onZoomOut - Zoom camera out
+ * @param {function} onFullscreen - Toggle fullscreen (optional)
+ * @param {boolean} isAutoRotating - Current auto-rotate state
+ * @param {string} className - Additional CSS classes
+ */
+const ModelControls = memo(({
+    onResetView,
+    onToggleAutoRotate,
+    onZoomIn,
+    onZoomOut,
+    onFullscreen,
+    isAutoRotating = false,
+    className = '',
+}) => {
+    return (
+        <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.2 }}
+            className={`
+        flex items-center gap-2 p-2 
+        bg-dark-800/90 backdrop-blur-sm 
+        rounded-xl border border-dark-700
+        ${className}
+      `}
+        >
+            {/* Reset View */}
+            <ControlButton
+                onClick={onResetView}
+                icon={RotateCcw}
+                label="Reset View"
+            />
+
+            {/* Divider */}
+            <div className="w-px h-6 bg-dark-600" />
+
+            {/* Auto Rotate Toggle */}
+            <ControlButton
+                onClick={onToggleAutoRotate}
+                icon={isAutoRotating ? Pause : RefreshCw}
+                label={isAutoRotating ? 'Stop Rotation' : 'Auto Rotate'}
+                isActive={isAutoRotating}
+            />
+
+            {/* Divider */}
+            <div className="w-px h-6 bg-dark-600" />
+
+            {/* Zoom Controls */}
+            <ControlButton
+                onClick={onZoomIn}
+                icon={ZoomIn}
+                label="Zoom In"
+            />
+            <ControlButton
+                onClick={onZoomOut}
+                icon={ZoomOut}
+                label="Zoom Out"
+            />
+
+            {/* Fullscreen (optional) */}
+            {onFullscreen && (
+                <>
+                    <div className="w-px h-6 bg-dark-600" />
+                    <ControlButton
+                        onClick={onFullscreen}
+                        icon={Maximize2}
+                        label="Fullscreen"
+                    />
+                </>
+            )}
+        </motion.div>
+    );
+});
+
+ModelControls.displayName = 'ModelControls';
+
+export default ModelControls;
+/**
+ * ModelViewer Component
+ * Main 3D viewer container with controls and state management
+ */
+
+import { useState, useRef, useCallback, useEffect, lazy, Suspense, memo } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import ModelControls from './ModelControls';
+import ModelLoadingState from '../common/ModelLoadingState';
+import ModelErrorState from '../common/ModelErrorState';
+
+// Lazy load the 3D component for performance
+const HandModel3D = lazy(() => import('./HandModel3D'));
+
+/**
+ * ModelViewer Component
+ * 
+ * @param {string} letter - Letter to display (A-Z)
+ * @param {function} onModelLoad - Callback when model loads
+ * @param {boolean} showControls - Show control toolbar (default: true)
+ * @param {string} className - Additional CSS classes
+ */
+const ModelViewer = memo(({
+    letter = 'A',
+    onModelLoad,
+    showControls = true,
+    className = '',
+}) => {
+    const [isLoading, setIsLoading] = useState(true);
+    const [hasError, setHasError] = useState(false);
+    const [autoRotate, setAutoRotate] = useState(false);
+    const controlsRef = useRef(null);
+
+    // Model path based on letter
+    const modelPath = `/models/alphabet/letter_${letter}.glb`;
+
+    // Handle model load success
+    const handleLoad = useCallback(() => {
+        console.log(`âœ… Model loaded: ${letter}`);
+        setIsLoading(false);
+        setHasError(false);
+        onModelLoad?.(letter);
+    }, [letter, onModelLoad]);
+
+    // Handle model load error
+    const handleError = useCallback((error) => {
+        console.log(`âš ï¸ Model error for ${letter}:`, error);
+        setIsLoading(false);
+        setHasError(true);
+    }, [letter]);
+
+    // Handle retry
+    const handleRetry = useCallback(() => {
+        setIsLoading(true);
+        setHasError(false);
+    }, []);
+
+    // Reset view to default camera position
+    const handleResetView = useCallback(() => {
+        if (controlsRef.current) {
+            controlsRef.current.reset();
+        }
+    }, []);
+
+    // Toggle auto-rotation
+    const handleToggleAutoRotate = useCallback(() => {
+        setAutoRotate(prev => !prev);
+    }, []);
+
+    // Zoom controls - OrbitControls uses camera position, not dollyTo
+    const handleZoomIn = useCallback(() => {
+        if (controlsRef.current) {
+            const camera = controlsRef.current.object;
+            const direction = camera.position.clone().normalize();
+            const newDistance = Math.max(camera.position.length() - 1, 2);
+            camera.position.copy(direction.multiplyScalar(newDistance));
+            controlsRef.current.update();
+        }
+    }, []);
+
+    const handleZoomOut = useCallback(() => {
+        if (controlsRef.current) {
+            const camera = controlsRef.current.object;
+            const direction = camera.position.clone().normalize();
+            const newDistance = Math.min(camera.position.length() + 1, 10);
+            camera.position.copy(direction.multiplyScalar(newDistance));
+            controlsRef.current.update();
+        }
+    }, []);
+
+    // Reset state when letter changes
+    useEffect(() => {
+        setIsLoading(true);
+        setHasError(false);
+    }, [letter]);
+
+    // Simulate model load completion (since we're using placeholder)
+    // In production, this would be called by the actual model loader
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            setIsLoading(false);
+        }, 1500);
+        return () => clearTimeout(timer);
+    }, []);
+
+    return (
+        <motion.div
+            initial={{ opacity: 0, scale: 0.98 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 0.3 }}
+            className={`
+        relative overflow-hidden
+        bg-dark-800 rounded-2xl
+        border border-dark-700
+        shadow-xl shadow-black/20
+        ${className}
+      `}
+        >
+            {/* Letter Badge */}
+            <div className="absolute top-4 left-4 z-10">
+                <motion.div
+                    initial={{ scale: 0 }}
+                    animate={{ scale: 1 }}
+                    transition={{ type: 'spring', stiffness: 300, delay: 0.2 }}
+                    className="
+            w-12 h-12 rounded-xl
+            bg-gradient-to-br from-primary to-secondary
+            flex items-center justify-center
+            text-2xl font-bold text-white
+            shadow-lg shadow-primary/30
+          "
+                >
+                    {letter}
+                </motion.div>
+            </div>
+
+            {/* Placeholder indicator */}
+            <div className="absolute top-4 right-4 z-10">
+                <motion.div
+                    initial={{ opacity: 0, x: 20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: 0.3 }}
+                    className="
+            px-3 py-1.5 rounded-full
+            bg-dark-700/80 backdrop-blur-sm
+            text-xs text-dark-300
+            border border-dark-600
+          "
+                >
+                    3D Preview
+                </motion.div>
+            </div>
+
+            {/* Model Container */}
+            <div className="
+        w-full aspect-square
+        sm:aspect-[4/3]
+        md:aspect-[16/10]
+        min-h-[300px]
+        sm:min-h-[400px]
+        lg:min-h-[500px]
+      ">
+                <div className="relative w-full h-full">
+                    <AnimatePresence mode="wait">
+                        {hasError ? (
+                            <motion.div
+                                key="error"
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                                className="absolute inset-0 z-20 bg-dark-800"
+                            >
+                                <ModelErrorState onRetry={handleRetry} />
+                            </motion.div>
+                        ) : isLoading ? (
+                            <motion.div
+                                key="loading"
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                                className="absolute inset-0 z-20 bg-dark-800"
+                            >
+                                <ModelLoadingState message={`Loading ${letter}...`} />
+                            </motion.div>
+                        ) : null}
+                    </AnimatePresence>
+
+                    {!hasError && (
+                        <motion.div
+                            key="model"
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            className="w-full h-full"
+                        >
+                            <Suspense fallback={null}>
+                                <HandModel3D
+                                    modelPath={modelPath}
+                                    letter={letter}
+                                    autoRotate={autoRotate}
+                                    onLoad={handleLoad}
+                                    onError={handleError}
+                                    controlsRef={controlsRef}
+                                />
+                            </Suspense>
+                        </motion.div>
+                    )}
+                </div>
+            </div>
+
+            {/* Controls Toolbar */}
+            {showControls && !isLoading && (
+                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10">
+                    <ModelControls
+                        onResetView={handleResetView}
+                        onToggleAutoRotate={handleToggleAutoRotate}
+                        onZoomIn={handleZoomIn}
+                        onZoomOut={handleZoomOut}
+                        isAutoRotating={autoRotate}
+                    />
+                </div>
+            )}
+
+            {/* Interaction hint */}
+            {!isLoading && !hasError && (
+                <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    transition={{ delay: 1 }}
+                    className="
+            absolute bottom-16 left-1/2 -translate-x-1/2 z-10
+            text-xs text-dark-400 pointer-events-none
+          "
+                >
+                    Drag to rotate â€¢ Scroll to zoom
+                </motion.div>
+            )}
+        </motion.div>
+    );
+});
+
+ModelViewer.displayName = 'ModelViewer';
+
+export default ModelViewer;

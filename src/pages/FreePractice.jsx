@@ -31,6 +31,7 @@ import SignSelector from '@/components/practice/SignSelector';
 
 // Hooks
 import { useHandDetection } from '@/hooks/useHandDetection';
+import { useLevelUp } from '@/context/LevelUpContext';
 
 // Services
 import { savePracticeSession, updateStreak, updateAccuracyAverage } from '@/services/database';
@@ -99,6 +100,7 @@ const SessionStats = ({ startTime, signsReviewed, validationAttempts }) => {
 const FreePractice = () => {
     const navigate = useNavigate();
     const { user, userData } = useAuthStore();
+    const { handleXPResult } = useLevelUp();
     const hasStartedRef = useRef(false);
 
     // State
@@ -190,13 +192,18 @@ const FreePractice = () => {
         if (!user?.uid || !selectedSign) return;
 
         try {
-            // Save practice session
-            await savePracticeSession(user.uid, {
+            // Save practice session and get XP result
+            const xpResult = await savePracticeSession(user.uid, {
                 sign: selectedSign,
                 accuracy: result.accuracy,
                 attempts: 1,
                 mode: 'free_practice'
             });
+
+            // Show level-up modal if user leveled up
+            if (xpResult) {
+                handleXPResult(xpResult);
+            }
 
             // Update streak and accuracy
             await updateStreak(user.uid);
@@ -286,7 +293,7 @@ const FreePractice = () => {
             >
                 <Button
                     variant="ghost"
-                    onClick={() => navigate('/practice/menu')}
+                    onClick={() => navigate('/practice')}
                     leftIcon={<ArrowLeft className="w-4 h-4" />}
                 >
                     Practice Menu

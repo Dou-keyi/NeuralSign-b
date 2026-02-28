@@ -150,7 +150,7 @@ const SignupForm = ({ onSubmit, isLoading, error, onClearError }) => {
         // Submit
         try {
             await onSubmit(formData.email, formData.password, formData.displayName);
-        } catch (err) {
+        } catch {
             // Error handled by parent
         }
     };

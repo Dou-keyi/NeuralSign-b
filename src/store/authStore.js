@@ -8,7 +8,12 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { onAuthStateChange, signIn, signUp, signInWithGoogle, logOut, resetPassword, updateUserProfile as authUpdateProfile } from '@/services/auth';
-import { getUserProfile } from '@/services/database';
+import { auth, db } from '@/services/firebase'; // Ensure db is imported if used directly or remove if not
+import {
+    createUserProfile,
+    getUserProfile
+} from '@/services/database';
+import { checkAndUnlockAchievements } from '@/services/achievementService';
 
 /**
  * Auth Store
@@ -51,6 +56,24 @@ const useAuthStore = create(
                             // Fetch user data from Firestore
                             const userData = await getUserProfile(firebaseUser.uid);
 
+                            // Check for missed achievements
+                            const newAchievements = await checkAndUnlockAchievements(firebaseUser.uid, userData);
+
+                            // Merge new achievements into local state if any were found
+                            let initialUserData = userData;
+                            if (newAchievements.length > 0) {
+                                console.log('🏆 Retroactively unlocked achievements:', newAchievements.length);
+                                const current = userData.achievements || [];
+                                const newEntries = newAchievements.map(a => ({
+                                    id: a.id,
+                                    unlockedAt: new Date().toISOString()
+                                }));
+                                initialUserData = {
+                                    ...userData,
+                                    achievements: [...current, ...newEntries]
+                                };
+                            }
+
                             set({
                                 user: {
                                     uid: firebaseUser.uid,
@@ -60,7 +83,7 @@ const useAuthStore = create(
                                     emailVerified: firebaseUser.emailVerified,
                                     metadata: firebaseUser.metadata,
                                 },
-                                userData: userData,
+                                userData: initialUserData,
                                 isAuthenticated: true,
                                 isLoading: false,
                                 error: null,
@@ -154,9 +177,10 @@ const useAuthStore = create(
                 set({ isLoading: true, error: null });
 
                 try {
-                    await signIn(email, password);
+                    const userCredential = await signIn(email, password);
                     // Auth state will be updated by onAuthStateChanged listener
                     console.log('✅ Login successful');
+                    return userCredential;
                 } catch (error) {
                     set({
                         error: error.message,

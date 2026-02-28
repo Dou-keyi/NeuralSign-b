@@ -123,6 +123,8 @@ const EditProfileModal = ({ isOpen, onClose, user, onSave, isLoading, error }) =
                                                         src={photoPreview}
                                                         alt="Profile"
                                                         className="w-full h-full object-cover"
+                                                        referrerPolicy="no-referrer"
+                                                        onError={(e) => { e.target.style.display = 'none'; }}
                                                     />
                                                 ) : (
                                                     <span className="text-3xl font-bold gradient-text">

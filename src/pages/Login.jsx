@@ -12,6 +12,8 @@ import Button from '@/components/common/Button';
 import ErrorMessage from '@/components/common/ErrorMessage';
 import GoogleSignInButton from '@/components/auth/GoogleSignInButton';
 import useAuthStore from '@/store/authStore';
+import { useAdmin } from '@/context/AdminContext';
+import { isAdmin as checkAdmin } from '@/config/adminConfig';
 import { cn, isValidEmail } from '@/utils/helpers';
 
 const Login = () => {
@@ -52,8 +54,17 @@ const Login = () => {
         }
 
         try {
-            await login(formData.email, formData.password);
-            navigate(from, { replace: true });
+            const user = await login(formData.email, formData.password);
+
+            // If there's a specific 'from' path, go there (unless it's just /learn and they are admin)
+            const isAdmin = checkAdmin(user);
+
+            if (location.state?.from && !isAdmin) {
+                navigate(from, { replace: true });
+            } else {
+                // Otherwise check if user is admin
+                navigate(isAdmin ? '/admin' : '/learn', { replace: true });
+            }
         } catch (err) {
             console.error('Login error:', err);
         }
@@ -61,8 +72,15 @@ const Login = () => {
 
     const handleGoogleSignIn = async () => {
         try {
-            await loginWithGoogle();
-            navigate(from, { replace: true });
+            const result = await loginWithGoogle();
+            const user = result.user || result; // Handle both return shapes
+
+            const isAdmin = checkAdmin(user);
+            if (location.state?.from && !isAdmin) {
+                navigate(from, { replace: true });
+            } else {
+                navigate(isAdmin ? '/admin' : '/learn', { replace: true });
+            }
         } catch (err) {
             console.error('Google sign-in error:', err);
         }

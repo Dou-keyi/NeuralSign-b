@@ -28,6 +28,7 @@ import Button from '@/components/common/Button';
 
 // Hooks
 import { useHandDetection } from '@/hooks/useHandDetection';
+import { useLevelUp } from '@/context/LevelUpContext';
 
 // Services
 import { savePracticeSession, updateStreak, getUserProfile } from '@/services/database';
@@ -156,6 +157,7 @@ const StartScreen = ({ learnedCount, personalBest, onStart }) => (
 const TimedChallenge = () => {
     const navigate = useNavigate();
     const { user, userData } = useAuthStore();
+    const { handleXPResult } = useLevelUp();
     const hasStartedRef = useRef(false);
 
     // Get learned signs
@@ -278,7 +280,8 @@ const TimedChallenge = () => {
         // Save results
         if (user?.uid) {
             try {
-                await savePracticeSession(user.uid, {
+                // Save practice session and get XP result
+                const xpResult = await savePracticeSession(user.uid, {
                     sign: 'challenge',
                     accuracy,
                     attempts,
@@ -288,14 +291,24 @@ const TimedChallenge = () => {
                     duration: CHALLENGE_DURATION
                 });
 
+                // Show level-up modal if user leveled up from practice XP
+                if (xpResult) {
+                    handleXPResult(xpResult);
+                }
+
                 await updateStreak(user.uid);
 
                 // Check daily challenge
                 const challenge = getTodayChallenge();
-                await checkChallengeCompletion(user.uid, challenge.id, {
+                const challengeResult = await checkChallengeCompletion(user.uid, challenge.id, {
                     score,
                     isPersonalBest: isNewPersonalBest
                 });
+
+                // Show level-up modal if challenge completion caused level-up
+                if (challengeResult?.xpResult) {
+                    handleXPResult(challengeResult.xpResult);
+                }
 
                 // Log analytics
                 if (analytics) {
@@ -310,7 +323,7 @@ const TimedChallenge = () => {
                 console.error('❌ Error saving challenge results:', error);
             }
         }
-    }, [user?.uid, score, attempts, personalBest, bestStreak, correctAttempts, stopDetection]);
+    }, [user?.uid, score, attempts, personalBest, bestStreak, correctAttempts, stopDetection, handleXPResult]);
 
     /**
      * Handle validation result
@@ -417,7 +430,7 @@ const TimedChallenge = () => {
             <PageContainer>
                 <Button
                     variant="ghost"
-                    onClick={() => navigate('/practice/menu')}
+                    onClick={() => navigate('/practice')}
                     leftIcon={<ArrowLeft className="w-4 h-4" />}
                     className="mb-4"
                 >
@@ -458,7 +471,7 @@ const TimedChallenge = () => {
                         personalBest
                     }}
                     onRetry={handleRetry}
-                    onExit={() => navigate('/practice/menu')}
+                    onExit={() => navigate('/practice')}
                 />
             </PageContainer>
         );

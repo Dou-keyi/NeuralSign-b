@@ -31,6 +31,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 
 // Hooks
 import { useHandDetection } from '@/hooks/useHandDetection';
+import { useLevelUp } from '@/context/LevelUpContext';
 
 // Services
 import { savePracticeSession, updateStreak, updateAccuracyAverage } from '@/services/database';
@@ -194,6 +195,7 @@ function calculateBestStreak(results) {
 const FlashcardMode = () => {
     const navigate = useNavigate();
     const { user, userData } = useAuthStore();
+    const { handleXPResult } = useLevelUp();
     const hasStartedRef = useRef(false);
     const startTimeRef = useRef(Date.now());
 
@@ -268,12 +270,18 @@ const FlashcardMode = () => {
         if (!user?.uid || !currentSign) return;
 
         try {
-            await savePracticeSession(user.uid, {
+            // savePracticeSession now returns XP result
+            const xpResult = await savePracticeSession(user.uid, {
                 sign: currentSign,
                 accuracy: result.accuracy,
                 attempts: 1,
                 mode: 'flashcard'
             });
+
+            // Show level-up modal if user leveled up
+            if (xpResult) {
+                handleXPResult(xpResult);
+            }
 
             await updateStreak(user.uid);
             await updateAccuracyAverage(user.uid);
@@ -329,7 +337,7 @@ const FlashcardMode = () => {
     /**
      * Go to next card
      */
-    const goToNext = useCallback(() => {
+    const goToNext = useCallback(async () => {
         clearValidation();
         setRevealed(false);
 
@@ -351,15 +359,20 @@ const FlashcardMode = () => {
             // Check daily challenge
             if (user?.uid) {
                 const challenge = getTodayChallenge();
-                checkChallengeCompletion(user.uid, challenge.id, {
+                const challengeResult = await checkChallengeCompletion(user.uid, challenge.id, {
                     roundsCompleted: shuffledSigns.length,
                     accuracy: Math.round((score.correct / score.total) * 100)
                 });
+
+                // Show level-up modal if challenge completion caused level-up
+                if (challengeResult?.xpResult) {
+                    handleXPResult(challengeResult.xpResult);
+                }
             }
         } else {
             setCurrentIndex(prev => prev + 1);
         }
-    }, [currentIndex, shuffledSigns.length, clearValidation, score, user?.uid]);
+    }, [currentIndex, shuffledSigns.length, clearValidation, score, user?.uid, handleXPResult]);
 
     /**
      * Retry session
@@ -450,7 +463,7 @@ const FlashcardMode = () => {
                     results={results}
                     onRetry={handleRetry}
                     onReviewMistakes={handleReviewMistakes}
-                    onExit={() => navigate('/practice/menu')}
+                    onExit={() => navigate('/practice')}
                 />
             </PageContainer>
         );
@@ -466,7 +479,7 @@ const FlashcardMode = () => {
             >
                 <Button
                     variant="ghost"
-                    onClick={() => navigate('/practice/menu')}
+                    onClick={() => navigate('/practice')}
                     leftIcon={<ArrowLeft className="w-4 h-4" />}
                 >
                     Exit

@@ -61,7 +61,7 @@ const LoginForm = ({ onSubmit, isLoading, error, onClearError }) => {
         // Submit
         try {
             await onSubmit(formData.email, formData.password);
-        } catch (err) {
+        } catch {
             // Error handled by parent
         }
     };

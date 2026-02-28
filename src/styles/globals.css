@@ -206,3 +206,26 @@ textarea:focus {
 .scrollbar-hide::-webkit-scrollbar {
     display: none;
 }
+
+/* Admin Form Input Utility */
+@utility input-field {
+    width: 100%;
+    padding: 0.5rem 1rem;
+    background-color: var(--color-dark-900);
+    border: 1px solid var(--color-dark-700);
+    border-radius: 0.5rem;
+    color: white;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.input-field::placeholder {
+    color: var(--color-dark-500);
+}
+
+.input-field:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.5);
+    border-color: var(--color-primary);
+}
