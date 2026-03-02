@@ -272,7 +272,7 @@ const ModelContent = memo(({
                     onError={handleModelError}
                     fallback={<PlaceholderModel letter={letter} color={letterColors[letter] || '#6366F1'} />}
                 >
-                    <Suspense fallback={<PlaceholderModel letter={letter} color={letterColors[letter] || '#6366F1'} />}>
+                    <Suspense fallback={null}>
                         <GLTFModel
                             modelPath={modelPath}
                             scale={scale}
