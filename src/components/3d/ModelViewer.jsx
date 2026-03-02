@@ -123,7 +123,7 @@ const ModelViewer = memo(({
         } else {
             fallbackTimer = setTimeout(() => {
                 setIsLoading(false);
-            }, 1500);
+            }, 15000);
         }
 
         if (videoRef.current) {
