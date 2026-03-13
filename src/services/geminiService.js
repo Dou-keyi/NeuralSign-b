@@ -666,10 +666,10 @@ Ensure the ASL order is natural and grammatically correct for ASL.`;
 
 /**
  * Analyze a sequence of raw ASL words and translate them into natural English,
- * providing grammar feedback for the learner.
+ * providing strict, educational kindergarten-teacher grammar feedback.
  * Used exclusively in the Free Flow Sentence Builder.
- * @param {string[]} words - Array of captured signs (e.g., ["I", "Love", "Water"])
- * @returns {Promise<Object>} - { smoothEnglish, feedback, missingSigns }
+ * @param {string[]} words 
+ * @returns {Promise<Object>} 
  */
 export async function translateASLSequence(words) {
     if (!words || words.length === 0) {
@@ -680,34 +680,42 @@ export async function translateASLSequence(words) {
         };
     }
 
-    // Retain the original hardcoded tutorial logic for the specific "I Water" case
-    const hasI = words.includes("I") || words.includes("i-me");
-    const hasWater = words.includes("Water") || words.includes("water");
-    const hasVerb = words.includes("Want") || words.includes("Love") || words.includes("want") || words.includes("love");
-
-    if (hasI && hasWater && !hasVerb) {
-        return {
-            smoothEnglish: "I want water. / I love water.",
-            feedback: "It looks like you forgot your verb! In ASL, you still need an action word between 'I' and 'Water'. Try practicing these missing signs:",
-            missingSigns: ["want", "love"]
-        };
-    }
-
-    if (hasI && hasWater && hasVerb) {
-        return {
-            smoothEnglish: `I ${words[1].toLowerCase()} water.`,
-            feedback: "Excellent! You used a perfect Subject-Verb-Object structure. Your ASL grammar is spot on!",
-            missingSigns: []
-        };
-    }
-
     const rawSequence = words.join(" ");
-    const prompt = `Translate this ASL sequence into natural English: [${rawSequence}]. Provide encouraging grammar feedback. Format as JSON with keys: smoothEnglish, feedback, missingSigns (array).`;
+    
+    // 🚀 NEW: Neatly formatted, dual-persona prompt with strict example rules
+    const prompt = `You are two teachers in one: A strict but friendly Kindergarten English Teacher, and an expert ASL Teacher.
+The user provided this sequence of ASL signs: [${rawSequence}].
+
+Analyze this sequence and provide feedback. 
+You MUST format your feedback with clean spacing using double newlines (\\n\\n) between each section so it is easy to read.
+
+Follow this EXACT structure for the "feedback" string:
+
+CRITICAL CONDITIONAL RULES:
+SCENARIO 1: The sequence HAS grammar mistakes or is missing words.
+You MUST output this EXACT structure:
+❌ Incorrect: [Literal translation of their signs]
+
+🤟 ASL Teacher: [As an ASL expert, explain the ASL logic. E.g., "In ASL we don't use 'is/am/are', but we still need action words like 'want' or 'love'."]
+
+🌟 Examples:
+[Provide 3 simple examples. CRITICAL RULE: You MUST keep the nouns/pronouns the user provided and ONLY swap the missing word. If they signed "I Water", examples must be: "1. I want water. 2. I drink water. 3. I love water." DO NOT change their original words to "juice" or "cookie".]
+
+SCENARIO 2: The sequence forms a PERFECTLY CORRECT English sentence (e.g., "I Love You").
+You MUST ONLY output this single line and absolutely NOTHING ELSE:
+✅ Correct: [Smooth, correct English sentence]
+
+You MUST format your overall response strictly as a JSON object with these keys:
+{
+  "smoothEnglish": "The final, correct natural English sentence",
+  "feedback": "Your beautifully formatted feedback using the emojis and \\n\\n for spacing, exactly as requested above.",
+  "missingSigns": ["array", "of", "suggested", "missing", "ASL", "signs", "(e.g., if they need a verb, suggest 'want' or 'love')"]
+}`;
 
     try {
         console.log(`📝 Translating ASL sequence: "${rawSequence}"`);
         
-        // Using the reliable fetch method that analyzeSentenceToSigns uses
+        // 🤝 Restored: Teammate's reliable fetch method using responseMimeType
         const response = await fetch(`${GEMINI_TEXT_URL}?key=${GEMINI_API_KEY}`, {
             method: 'POST',
             headers: {
@@ -719,7 +727,6 @@ export async function translateASLSequence(words) {
                 }],
                 generationConfig: {
                     temperature: 0.2,
-                    // 🚀 THIS FORCES GOOGLE TO ONLY RETURN PURE JSON
                     responseMimeType: "application/json", 
                 }
             })
@@ -737,9 +744,8 @@ export async function translateASLSequence(words) {
             throw new Error("API returned empty text.");
         }
 
-        console.log("📝 Raw Gemini Translation Response:", textResponse);
+        console.log("📝 Raw Gemini Teacher Response:", textResponse);
 
-        // Because we used responseMimeType, we can safely parse it directly
         const parsedResult = JSON.parse(textResponse);
 
         return {
@@ -750,8 +756,6 @@ export async function translateASLSequence(words) {
 
     } catch (error) {
         console.error("❌ Error translating ASL sequence:", error);
-        
-        // 🚀 THIS WILL SHOW THE EXACT ERROR ON YOUR SCREEN IF IT FAILS!
         return { 
             smoothEnglish: words.join(" "), 
             feedback: `System Error: ${error.message}`, 
@@ -759,6 +763,7 @@ export async function translateASLSequence(words) {
         };
     }
 }
+
 /**
  * Validate a complete ASL word or phrase (used in coherent mode progression)
  * @param {string} imageBase64 - Base64 encoded image

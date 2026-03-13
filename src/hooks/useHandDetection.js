@@ -53,6 +53,8 @@ export function useHandDetection({
     const [detectionResult, setDetectionResult] = useState(null);
     const [error, setError] = useState(null);
     const [cooldownRemaining, setCooldownRemaining] = useState(0);
+    const [dwellProgress, setDwellProgress] = useState(0);
+    const dwellStartTimeRef = useRef(null);
 
     // Refs
     const canvasRef = useRef(null);
@@ -276,6 +278,44 @@ export function useHandDetection({
     }, [isDetecting, isCameraActive, processFrameLoop]);
 
     /**
+     * 🚀 NEW: 5-Second Dwell Progress Timer
+     * Fills up a progress bar. When it hits 100%, it automatically sends the photo to Gemini!
+     */
+    useEffect(() => {
+        let frameId;
+        const processDwell = () => {
+            // If camera is off, no hand is visible, we are currently validating, or we are in cooldown
+            if (!isDetecting || !handDetected || isValidating || cooldownRemaining > 0) {
+                setDwellProgress(0);
+                dwellStartTimeRef.current = null;
+                frameId = requestAnimationFrame(processDwell);
+                return;
+            }
+
+            // Start or update the timer
+            if (!dwellStartTimeRef.current) {
+                dwellStartTimeRef.current = Date.now();
+            } else {
+                const elapsed = Date.now() - dwellStartTimeRef.current;
+                const progress = Math.min(100, (elapsed / 5000) * 100); // 5000ms = 5 seconds
+                setDwellProgress(progress);
+
+                // When the bar hits 100%, trigger Gemini automatically!
+                if (progress === 100) {
+                    console.log('⏱️ 5 seconds complete! Auto-triggering Gemini...');
+                    setDwellProgress(0);
+                    dwellStartTimeRef.current = null;
+                    validateSign();
+                    return; // Stop this loop temporarily while it validates
+                }
+            }
+            frameId = requestAnimationFrame(processDwell);
+        };
+        
+        frameId = requestAnimationFrame(processDwell);
+        return () => cancelAnimationFrame(frameId);
+    }, [isDetecting, handDetected, isValidating, cooldownRemaining, validateSign]);
+    /**
      * Update cooldown timer - polls geminiService for API cooldown
      */
     useEffect(() => {
@@ -335,6 +375,7 @@ export function useHandDetection({
         validationResult,
         error: error || cameraError,
         cooldownRemaining,
+        dwellProgress,
 
         // Actions
         startDetection,

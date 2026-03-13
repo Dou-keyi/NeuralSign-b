@@ -2,8 +2,7 @@
  * PracticeWords Page
  * Practice mode for word signs with camera detection and validation
  * Enhanced with OpenCV.js for motion tracking and gesture recognition
- * 
- * NeuralSign - AI Sign Language Learning Platform
+ * * NeuralSign - AI Sign Language Learning Platform
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
@@ -12,7 +11,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
     ArrowLeft, Camera, CameraOff, Video, RotateCcw,
     Check, X, Lightbulb, Target, TrendingUp,
-    ChevronRight, Trophy, Star, Zap, Play, Eye, Activity
+    ChevronRight, Trophy, Star, Zap, Play, Eye, Activity, Timer, Hand, Loader2
 } from 'lucide-react';
 
 // Components
@@ -89,7 +88,6 @@ const PracticeComplete = ({ stats, word, onRestart, onExit, onNextWord }) => (
     </motion.div>
 );
 
-
 const PracticeWords = () => {
     const { wordId } = useParams();
     const navigate = useNavigate();
@@ -106,7 +104,6 @@ const PracticeWords = () => {
     const [correctCount, setCorrectCount] = useState(0);
     const [showHint, setShowHint] = useState(false);
     const [feedback, setFeedback] = useState(null);
-    const [validating, setValidating] = useState(false);
     const [xpEarned, setXpEarned] = useState(0);
 
     // OpenCV / Enhanced Detection state
@@ -118,10 +115,75 @@ const PracticeWords = () => {
     const [showDebug, setShowDebug] = useState(false);
 
     const motionUpdateRef = useRef(null);
-
+    const latestDetectionRef = useRef(null);
     const maxAttempts = 5;
 
-    // Hand detection hook
+    // 🚀 NEW: Intercept the auto-validation from the hook to run your custom Word/OpenCV logic!
+    const handleAutoValidation = useCallback(async (geminiResult) => {
+        if (!word) return;
+        setFeedback(null);
+
+        try {
+            let wordResult = null;
+            const currentDetection = latestDetectionRef.current;
+
+            // Run your local OpenCV word validation
+            if (currentDetection?.landmarks) {
+                if (useEnhanced && enhancedReady) {
+                    wordResult = await enhancedWordValidator.validateSign(
+                        word, currentDetection.landmarks, currentDetection.handedness || 'Right'
+                    );
+                } else {
+                    wordResult = validateWordSign(
+                        word, currentDetection.landmarks, currentDetection.handedness || 'Right'
+                    );
+                }
+            }
+
+            // Combine Gemini and Local CV Results
+            const isCorrect = geminiResult?.isCorrect || wordResult?.isValid || false;
+            const confidence = geminiResult?.accuracy || (wordResult?.confidence ? Math.round(wordResult.confidence * 100) : 0);
+            const feedbackMsg = geminiResult?.feedback || wordResult?.feedback || 'Try again!';
+
+            // Update stats
+            setAttempts(prev => {
+                const nextAttempts = prev + 1;
+                if (nextAttempts >= 2 && !isCorrect) setShowHint(true);
+                if (nextAttempts >= maxAttempts) {
+                    setTimeout(() => { stopDetection(); setPracticeComplete(true); }, 2000);
+                }
+                return nextAttempts;
+            });
+
+            // Award XP if correct
+            if (isCorrect) {
+                setCorrectCount(prev => prev + 1);
+                const xpAmount = Math.round(XP_SOURCES.PRACTICE_SESSION.amount * (confidence / 100));
+                if (user?.uid) {
+                    addXP(user.uid, xpAmount, 'PRACTICE_SESSION', `Practiced: ${word.englishText}`)
+                        .then(() => setXpEarned(prev => prev + xpAmount))
+                        .catch(e => console.warn('XP award failed', e));
+                }
+                setFeedback({ type: 'success', message: feedbackMsg, confidence });
+            } else {
+                setFeedback({ type: 'error', message: feedbackMsg, confidence });
+            }
+
+            // Save to DB & Reset Tracker
+            if (user?.uid) wordsService.updateWordAccuracy(user.uid, word.id, confidence);
+            if (enhancedReady) {
+                enhancedWordValidator.resetMotion();
+                setMotionData(null);
+                setTrajectory([]);
+            }
+
+        } catch (error) {
+            console.error('Validation error:', error);
+            setFeedback({ type: 'error', message: 'Unable to validate. Make sure your hand is visible.', confidence: 0 });
+        }
+    }, [word, useEnhanced, enhancedReady, user?.uid]);
+
+    // Hand detection hook (Now fully automated!)
     const {
         videoRef,
         canvasRef,
@@ -130,25 +192,45 @@ const PracticeWords = () => {
         isCameraLoading,
         handDetected,
         detectionResult,
-        validationResult,
+        isValidating, // Replaces local validating state
         error: detectionError,
         cooldownRemaining,
         startDetection,
         stopDetection,
-        validateSign: validateWithGemini,
-        clearValidation
+        clearValidation,
+        dwellProgress
     } = useHandDetection({
         targetLetter: word?.englishText || '',
         onCorrectSign: null,
-        onValidationResult: null
+        onValidationResult: handleAutoValidation // Connect custom logic
     });
+
+    // Keep detection ref updated for the callback closure
+    useEffect(() => {
+        latestDetectionRef.current = detectionResult;
+    }, [detectionResult]);
+
+    // 🚀 NEW: Hand Position Tracking State for Floating Circle
+    const [handPosition, setHandPosition] = useState({ x: 50, y: 50 });
+
+    useEffect(() => {
+        if (handDetected && detectionResult?.landmarks) {
+            const landmarks = detectionResult.landmarks;
+            let minY = 1, meanX = 0;
+            landmarks.forEach(lm => { 
+                if (lm.y < minY) minY = lm.y; 
+                meanX += lm.x; 
+            });
+            meanX = meanX / landmarks.length;
+            setHandPosition({ x: (1 - meanX) * 100, y: minY * 100 });
+        }
+    }, [handDetected, detectionResult]);
 
     // Initialize enhanced validator when toggled on
     useEffect(() => {
         if (useEnhanced && !enhancedReady) {
             enhancedWordValidator.initialize().then(() => {
                 setEnhancedReady(true);
-                console.log('Enhanced word validator initialized');
             }).catch(err => {
                 console.warn('Enhanced validator init failed:', err);
                 setUseEnhanced(false);
@@ -158,17 +240,10 @@ const PracticeWords = () => {
 
     // Feed landmarks to motion tracker when detecting
     useEffect(() => {
-        if (!isDetecting || !detectionResult?.landmarks || !useEnhanced || !enhancedReady) {
-            return;
-        }
+        if (!isDetecting || !detectionResult?.landmarks || !useEnhanced || !enhancedReady) return;
 
-        // Feed landmarks to enhanced validator's motion tracker
-        enhancedWordValidator.motionTracker?.addPosition(
-            detectionResult.landmarks,
-            Date.now()
-        );
+        enhancedWordValidator.motionTracker?.addPosition(detectionResult.landmarks, Date.now());
 
-        // Update motion data for UI (throttled)
         if (!motionUpdateRef.current || Date.now() - motionUpdateRef.current > 100) {
             motionUpdateRef.current = Date.now();
             setMotionData(enhancedWordValidator.getMotionData());
@@ -185,13 +260,8 @@ const PracticeWords = () => {
                     const wordData = await wordsService.getWordById(wordId);
                     setWord(wordData);
                 } else {
-                    // Get a recommended word
-                    const recommended = await wordsService.getRecommendedWords(
-                        userData?.wordsProgress || {}, 1
-                    );
-                    if (recommended.length > 0) {
-                        setWord(recommended[0]);
-                    }
+                    const recommended = await wordsService.getRecommendedWords(userData?.wordsProgress || {}, 1);
+                    if (recommended.length > 0) setWord(recommended[0]);
                 }
             } catch (error) {
                 console.error('Error loading word:', error);
@@ -215,116 +285,9 @@ const PracticeWords = () => {
         setTrajectory([]);
         clearValidation();
 
-        // Reset motion tracking
-        if (enhancedReady) {
-            enhancedWordValidator.resetMotion();
-        }
-
+        if (enhancedReady) enhancedWordValidator.resetMotion();
         await startDetection();
     }, [startDetection, clearValidation, enhancedReady]);
-
-    // Validate current sign using word validation
-    const handleValidate = useCallback(async () => {
-        if (!word || validating || cooldownRemaining > 0) return;
-
-        setValidating(true);
-        setFeedback(null);
-
-        try {
-            // Use Gemini for visual validation
-            const geminiResult = await validateWithGemini();
-
-            // Also use our word-specific validator if we have landmarks
-            let wordResult = null;
-            if (detectionResult?.landmarks) {
-                if (useEnhanced && enhancedReady) {
-                    // Use enhanced validator with motion analysis
-                    wordResult = await enhancedWordValidator.validateSign(
-                        word,
-                        detectionResult.landmarks,
-                        detectionResult.handedness || 'Right'
-                    );
-                } else {
-                    // Fallback to base validator
-                    wordResult = validateWordSign(
-                        word,
-                        detectionResult.landmarks,
-                        detectionResult.handedness || 'Right'
-                    );
-                }
-            }
-
-            // Combine results: prefer Gemini accuracy if available
-            const isCorrect = geminiResult?.isCorrect || wordResult?.isValid || false;
-            const confidence = geminiResult?.accuracy ||
-                (wordResult?.confidence ? Math.round(wordResult.confidence * 100) : 0);
-            const feedbackMsg = geminiResult?.feedback || wordResult?.feedback || 'Try again!';
-
-            setAttempts(prev => prev + 1);
-
-            if (isCorrect) {
-                setCorrectCount(prev => prev + 1);
-
-                // Award XP
-                const xpAmount = Math.round(XP_SOURCES.PRACTICE_SESSION.amount * (confidence / 100));
-                if (user?.uid) {
-                    try {
-                        await addXP(user.uid, xpAmount, 'PRACTICE_SESSION', `Practiced: ${word.englishText}`);
-                        setXpEarned(prev => prev + xpAmount);
-                    } catch (e) {
-                        console.warn('XP award failed', e);
-                    }
-                }
-
-                setFeedback({
-                    type: 'success',
-                    message: feedbackMsg,
-                    confidence
-                });
-            } else {
-                setFeedback({
-                    type: 'error',
-                    message: feedbackMsg,
-                    confidence
-                });
-
-                // Show hint after 3 failed attempts
-                if (attempts >= 2) {
-                    setShowHint(true);
-                }
-            }
-
-            // Update accuracy in wordsService
-            if (user?.uid) {
-                await wordsService.updateWordAccuracy(user.uid, word.id, confidence);
-            }
-
-            // Reset motion tracking for next attempt
-            if (enhancedReady) {
-                enhancedWordValidator.resetMotion();
-                setMotionData(null);
-                setTrajectory([]);
-            }
-
-            // Check if practice is complete
-            if (attempts + 1 >= maxAttempts) {
-                setTimeout(() => {
-                    stopDetection();
-                    setPracticeComplete(true);
-                }, 2000);
-            }
-
-        } catch (error) {
-            console.error('Validation error:', error);
-            setFeedback({
-                type: 'error',
-                message: 'Unable to validate. Make sure your hand is visible.',
-                confidence: 0
-            });
-        } finally {
-            setValidating(false);
-        }
-    }, [word, validating, cooldownRemaining, validateWithGemini, detectionResult, attempts, user?.uid, stopDetection, useEnhanced, enhancedReady]);
 
     // Restart practice
     const handleRestart = useCallback(async () => {
@@ -338,33 +301,21 @@ const PracticeWords = () => {
         setTrajectory([]);
         clearValidation();
 
-        if (enhancedReady) {
-            enhancedWordValidator.resetMotion();
-        }
-
+        if (enhancedReady) enhancedWordValidator.resetMotion();
         await startDetection();
     }, [startDetection, clearValidation, enhancedReady]);
 
     // Load next word
     const handleNextWord = useCallback(async () => {
-        const recommended = await wordsService.getRecommendedWords(
-            userData?.wordsProgress || {}, 1
-        );
-        if (recommended.length > 0) {
-            navigate(`/practice/words/${recommended[0].id}`);
-        }
+        const recommended = await wordsService.getRecommendedWords(userData?.wordsProgress || {}, 1);
+        if (recommended.length > 0) navigate(`/practice/words/${recommended[0].id}`);
     }, [navigate, userData?.wordsProgress]);
 
-    // Keep a ref to stopDetection so cleanup doesn't re-run on reference changes
+    // Cleanup on unmount
     const stopDetectionRef = useRef(stopDetection);
     stopDetectionRef.current = stopDetection;
-
-    // Cleanup on unmount only (empty deps avoids React StrictMode double-fire)
     useEffect(() => {
-        return () => {
-            stopDetectionRef.current();
-        };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
+        return () => stopDetectionRef.current();
     }, []);
 
     const accuracy = attempts > 0 ? Math.round((correctCount / attempts) * 100) : 0;
@@ -384,9 +335,7 @@ const PracticeWords = () => {
             <PageContainer>
                 <div className="text-center py-12">
                     <p className="text-dark-400 text-lg">No word selected for practice</p>
-                    <Button variant="glass" onClick={() => navigate('/learn/words')} className="mt-4">
-                        Browse Words
-                    </Button>
+                    <Button variant="glass" onClick={() => navigate('/learn/words')} className="mt-4">Browse Words</Button>
                 </div>
             </PageContainer>
         );
@@ -410,24 +359,15 @@ const PracticeWords = () => {
     return (
         <PageContainer>
             {/* Header */}
-            <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="mb-6"
-            >
-                <button
-                    onClick={() => navigate(-1)}
-                    className="flex items-center gap-2 text-dark-400 hover:text-primary transition-colors mb-4"
-                >
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-6">
+                <button onClick={() => navigate(-1)} className="flex items-center gap-2 text-dark-400 hover:text-primary transition-colors mb-4">
                     <ArrowLeft className="w-4 h-4" />
                     <span className="text-sm">Back</span>
                 </button>
 
                 <div className="flex items-center justify-between">
                     <div>
-                        <h1 className="text-2xl font-bold text-dark-100">
-                            Practice: {word.englishText}
-                        </h1>
+                        <h1 className="text-2xl font-bold text-dark-100">Practice: {word.englishText}</h1>
                         <p className="text-dark-400 text-sm">{word.shortDescription}</p>
                     </div>
 
@@ -453,117 +393,58 @@ const PracticeWords = () => {
 
             {/* Pre-practice: Show reference */}
             {!practiceStarted && (
-                <motion.div
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.1 }}
-                    className="max-w-2xl mx-auto"
-                >
-                    {/* Reference Video */}
+                <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="max-w-2xl mx-auto">
                     <div className="glass-card p-6 mb-6">
-                        <h3 className="text-lg font-semibold text-dark-100 mb-3 flex items-center gap-2">
-                            <Video className="w-5 h-5 text-primary" />
-                            Reference Sign
-                        </h3>
-                        <VideoPlayer
-                            videoUrl={word.videoUrl}
-                            poster={word.thumbnailUrl}
-                            loop={true}
-                            autoplay={true}
-                            className="mb-4"
-                        />
+                        <h3 className="text-lg font-semibold text-dark-100 mb-3 flex items-center gap-2"><Video className="w-5 h-5 text-primary" /> Reference Sign</h3>
+                        <VideoPlayer videoUrl={word.videoUrl} poster={word.thumbnailUrl} loop={true} autoplay={true} className="mb-4" />
                         <p className="text-dark-300 text-sm">{word.description}</p>
                     </div>
 
-                    {/* Tips */}
                     {word.learningTips?.length > 0 && (
                         <div className="glass-card p-5 mb-6">
-                            <div className="flex items-center gap-2 mb-3">
-                                <Lightbulb className="w-5 h-5 text-warning" />
-                                <h3 className="font-semibold text-dark-100">Tips</h3>
-                            </div>
+                            <div className="flex items-center gap-2 mb-3"><Lightbulb className="w-5 h-5 text-warning" /><h3 className="font-semibold text-dark-100">Tips</h3></div>
                             <ul className="space-y-2">
                                 {word.learningTips.map((tip, i) => (
-                                    <li key={i} className="text-sm text-dark-300 flex items-start gap-2">
-                                        <span className="text-warning">•</span> {tip}
-                                    </li>
+                                    <li key={i} className="text-sm text-dark-300 flex items-start gap-2"><span className="text-warning">•</span> {tip}</li>
                                 ))}
                             </ul>
                         </div>
                     )}
 
-                    {/* Start Button */}
-                    <Button
-                        variant="primary"
-                        className="w-full py-4 text-lg"
-                        onClick={handleStartPractice}
-                        rightIcon={<Camera className="w-5 h-5" />}
-                    >
-                        Start Practice
-                    </Button>
+                    <Button variant="primary" className="w-full py-4 text-lg" onClick={handleStartPractice} rightIcon={<Camera className="w-5 h-5" />}>Start Practice</Button>
                 </motion.div>
             )}
 
             {/* Practice Mode */}
             {practiceStarted && !practiceComplete && (
                 <div className="grid lg:grid-cols-2 gap-6">
-                    {/* Reference */}
-                    <motion.div
-                        initial={{ opacity: 0, x: -20 }}
-                        animate={{ opacity: 1, x: 0 }}
-                    >
+                    {/* Reference Column */}
+                    <motion.div initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }}>
                         <div className="glass-card p-4">
-                            <h3 className="text-sm font-medium text-dark-300 mb-3 flex items-center gap-2">
-                                <Video className="w-4 h-4" />
-                                Reference
-                            </h3>
-                            <VideoPlayer
-                                videoUrl={word.videoUrl}
-                                poster={word.thumbnailUrl}
-                                loop={true}
-                                autoplay={true}
-                            />
+                            <h3 className="text-sm font-medium text-dark-300 mb-3 flex items-center gap-2"><Video className="w-4 h-4" /> Reference</h3>
+                            <VideoPlayer videoUrl={word.videoUrl} poster={word.thumbnailUrl} loop={true} autoplay={true} />
                             <p className="text-xs text-dark-400 mt-2">{word.shortDescription}</p>
                         </div>
 
-                        {/* Hint */}
                         <AnimatePresence>
                             {showHint && (
-                                <motion.div
-                                    initial={{ opacity: 0, height: 0 }}
-                                    animate={{ opacity: 1, height: 'auto' }}
-                                    exit={{ opacity: 0, height: 0 }}
-                                    className="glass-card p-4 mt-3 border border-warning/20"
-                                >
-                                    <div className="flex items-center gap-2 mb-2">
-                                        <Lightbulb className="w-4 h-4 text-warning" />
-                                        <span className="text-sm font-medium text-warning">Hint</span>
-                                    </div>
+                                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="glass-card p-4 mt-3 border border-warning/20">
+                                    <div className="flex items-center gap-2 mb-2"><Lightbulb className="w-4 h-4 text-warning" /><span className="text-sm font-medium text-warning">Hint</span></div>
                                     <p className="text-sm text-dark-300">{word.description}</p>
-                                    {word.learningTips?.[0] && (
-                                        <p className="text-xs text-dark-400 mt-2">{word.learningTips[0]}</p>
-                                    )}
+                                    {word.learningTips?.[0] && <p className="text-xs text-dark-400 mt-2">{word.learningTips[0]}</p>}
                                 </motion.div>
                             )}
                         </AnimatePresence>
 
-                        {/* Motion Analysis Panel */}
-                        {useEnhanced && enhancedReady && motionData && (
-                            <MotionAnalysisDisplay
-                                motionData={motionData}
-                                className="mt-3"
-                            />
-                        )}
+                        {useEnhanced && enhancedReady && motionData && <MotionAnalysisDisplay motionData={motionData} className="mt-3" />}
                     </motion.div>
 
-                    {/* Camera Feed */}
-                    <motion.div
-                        initial={{ opacity: 0, x: 20 }}
-                        animate={{ opacity: 1, x: 0 }}
-                    >
+                    {/* Camera Feed Column */}
+                    <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}>
                         <div className="space-y-4">
-                            {/* Camera Feed - uses same CameraFeed as letter practice */}
-                            <div className="relative">
+                            
+                            {/* 🚀 FIXED: Wrapped CameraFeed & Tracker in unified container */}
+                            <div className="relative w-full rounded-xl overflow-hidden aspect-video bg-black flex items-center justify-center border border-dark-700">
                                 <CameraFeed
                                     videoRef={videoRef}
                                     canvasRef={canvasRef}
@@ -577,69 +458,61 @@ const PracticeWords = () => {
                                     onRetry={startDetection}
                                 />
 
-                                {/* Motion Trail Overlay (sits on top of CameraFeed) */}
+                                {/* Motion Trail Overlay */}
                                 {useEnhanced && showMotionTrail && trajectory.length > 1 && (
                                     <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 10 }}>
                                         <MotionTrailOverlay trajectory={trajectory} />
                                     </div>
                                 )}
+
+                                {/* 🚀 NEW: Floating Circular Tracker */}
+                                <AnimatePresence>
+                                    {isCameraActive && handDetected && !isValidating && cooldownRemaining === 0 && (
+                                        <motion.div 
+                                            key="floating-circle"
+                                            initial={{ opacity: 0, scale: 0.8 }} 
+                                            animate={{ opacity: 1, scale: 1 }} 
+                                            exit={{ opacity: 0, scale: 0.8 }} 
+                                            className="absolute z-30 pointer-events-none" 
+                                            style={{ left: `${handPosition.x}%`, top: `${Math.max(10, handPosition.y - 15)}%`, transform: 'translate(-50%, -50%)' }}
+                                        >
+                                            <div className="relative flex items-center justify-center">
+                                                <svg width="100" height="100" className="absolute rotate-[-90deg]">
+                                                    <circle cx="50" cy="50" r="46" fill="none" stroke="rgba(99,102,241,0.2)" strokeWidth="6" />
+                                                    <circle cx="50" cy="50" r="46" fill="none" stroke="#6366F1" strokeWidth="6" strokeDasharray="289" strokeDashoffset={289 - (289 * (dwellProgress || 0)) / 100} className="transition-all duration-75" />
+                                                </svg>
+                                                <div className="bg-dark-900/90 px-4 py-2 flex items-center justify-center rounded-full border border-primary/50 shadow-xl whitespace-nowrap"><span className="text-white font-bold">{word.englishText}</span></div>
+                                            </div>
+                                        </motion.div>
+                                    )}
+                                </AnimatePresence>
+
+                                {/* 🚀 NEW: Bottom Status Overlays */}
+                                <AnimatePresence mode="wait">
+                                    {isValidating && (
+                                        <motion.div key="v" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 bg-primary/90 backdrop-blur-md px-4 py-2 rounded-xl text-white font-bold flex items-center gap-2 shadow-2xl"><Loader2 className="w-4 h-4 animate-spin" /> Analyzing...</motion.div>
+                                    )}
+                                    {cooldownRemaining > 0 && !isValidating && (
+                                        <motion.div key="c" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 bg-dark-800/95 backdrop-blur-md px-4 py-2 rounded-xl text-dark-300 font-bold shadow-xl border border-dark-600">Ready in {cooldownRemaining}s</motion.div>
+                                    )}
+                                    
+                                </AnimatePresence>
                             </div>
 
                             {/* Enhanced Detection Toggles */}
                             <div className="flex items-center gap-3 mb-3">
-                                <button
-                                    onClick={() => setUseEnhanced(!useEnhanced)}
-                                    className={`text-xs px-3 py-1.5 rounded-full flex items-center gap-1.5 transition-colors ${useEnhanced
-                                        ? 'bg-primary/20 text-primary border border-primary/30'
-                                        : 'bg-dark-800 text-dark-400 border border-dark-700'
-                                        }`}
-                                >
-                                    <Activity className="w-3 h-3" />
-                                    Enhanced Detection
+                                <button onClick={() => setUseEnhanced(!useEnhanced)} className={`text-xs px-3 py-1.5 rounded-full flex items-center gap-1.5 transition-colors ${useEnhanced ? 'bg-primary/20 text-primary border border-primary/30' : 'bg-dark-800 text-dark-400 border border-dark-700'}`}>
+                                    <Activity className="w-3 h-3" /> Enhanced Detection
                                 </button>
-
                                 {useEnhanced && (
-                                    <button
-                                        onClick={() => setShowMotionTrail(!showMotionTrail)}
-                                        className={`text-xs px-3 py-1.5 rounded-full flex items-center gap-1.5 transition-colors ${showMotionTrail
-                                            ? 'bg-secondary/20 text-secondary border border-secondary/30'
-                                            : 'bg-dark-800 text-dark-400 border border-dark-700'
-                                            }`}
-                                    >
-                                        <Eye className="w-3 h-3" />
-                                        Motion Trail
+                                    <button onClick={() => setShowMotionTrail(!showMotionTrail)} className={`text-xs px-3 py-1.5 rounded-full flex items-center gap-1.5 transition-colors ${showMotionTrail ? 'bg-secondary/20 text-secondary border border-secondary/30' : 'bg-dark-800 text-dark-400 border border-dark-700'}`}>
+                                        <Eye className="w-3 h-3" /> Motion Trail
                                     </button>
                                 )}
-
-                                {/* Debug panel toggle (dev only) */}
                                 {import.meta.env.DEV && (
-                                    <button
-                                        onClick={() => setShowDebug(!showDebug)}
-                                        className="text-xs px-2 py-1.5 rounded bg-dark-800 text-dark-500 hover:text-dark-300 ml-auto"
-                                    >
-                                        🐛
-                                    </button>
+                                    <button onClick={() => setShowDebug(!showDebug)} className="text-xs px-2 py-1.5 rounded bg-dark-800 text-dark-500 hover:text-dark-300 ml-auto">🐛</button>
                                 )}
                             </div>
-
-                            {/* Validate Button */}
-                            <Button
-                                variant="primary"
-                                className="w-full py-3"
-                                onClick={handleValidate}
-                                disabled={!handDetected || validating || cooldownRemaining > 0}
-                            >
-                                {validating ? (
-                                    <>Analyzing...</>
-                                ) : cooldownRemaining > 0 ? (
-                                    <>Wait {cooldownRemaining}s</>
-                                ) : (
-                                    <>
-                                        <Target className="w-4 h-4 mr-2" />
-                                        Validate My Sign
-                                    </>
-                                )}
-                            </Button>
                         </div>
 
                         {/* Feedback */}
@@ -650,27 +523,13 @@ const PracticeWords = () => {
                                     initial={{ opacity: 0, y: 10 }}
                                     animate={{ opacity: 1, y: 0 }}
                                     exit={{ opacity: 0, y: -10 }}
-                                    className={`glass-card p-4 mt-3 border ${feedback.type === 'success'
-                                        ? 'border-success/30 bg-success/5'
-                                        : 'border-error/30 bg-error/5'
-                                        }`}
+                                    className={`glass-card p-4 mt-3 border ${feedback.type === 'success' ? 'border-success/30 bg-success/5' : 'border-error/30 bg-error/5'}`}
                                 >
                                     <div className="flex items-start gap-3">
-                                        {feedback.type === 'success' ? (
-                                            <Check className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
-                                        ) : (
-                                            <X className="w-5 h-5 text-error flex-shrink-0 mt-0.5" />
-                                        )}
+                                        {feedback.type === 'success' ? <Check className="w-5 h-5 text-success flex-shrink-0 mt-0.5" /> : <X className="w-5 h-5 text-error flex-shrink-0 mt-0.5" />}
                                         <div>
-                                            <p className={`text-sm font-medium ${feedback.type === 'success' ? 'text-success' : 'text-error'
-                                                }`}>
-                                                {feedback.message}
-                                            </p>
-                                            {feedback.confidence > 0 && (
-                                                <p className="text-xs text-dark-400 mt-1">
-                                                    Confidence: {feedback.confidence}%
-                                                </p>
-                                            )}
+                                            <p className={`text-sm font-medium ${feedback.type === 'success' ? 'text-success' : 'text-error'}`}>{feedback.message}</p>
+                                            {feedback.confidence > 0 && <p className="text-xs text-dark-400 mt-1">Confidence: {feedback.confidence}%</p>}
                                         </div>
                                     </div>
                                 </motion.div>
@@ -680,11 +539,7 @@ const PracticeWords = () => {
                 </div>
             )}
 
-            {/* OpenCV Debug Panel (dev only) */}
-            <OpenCVDebugPanel
-                motionData={motionData}
-                visible={showDebug}
-            />
+            <OpenCVDebugPanel motionData={motionData} visible={showDebug} />
         </PageContainer>
     );
 };

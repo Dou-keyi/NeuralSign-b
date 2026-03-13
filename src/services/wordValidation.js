@@ -24,7 +24,7 @@ class WordValidator {
             return {
                 isValid: false,
                 confidence: 0,
-                feedback: 'No hand detected. Show your hand clearly to the camera.'
+
             };
         }
 

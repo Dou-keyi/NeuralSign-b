@@ -235,7 +235,7 @@ const FreeFlowMode = () => {
                             <p className="text-2xl font-bold text-white mb-4">{translationResult.smoothEnglish}</p>
                             <div className="flex items-start gap-3 p-4 rounded-xl bg-primary/5 border border-primary/20">
                                 <Info className="w-5 h-5 text-primary shrink-0" />
-                                <div><p className="text-sm font-bold text-dark-200">Grammar Note</p><p className="text-sm text-dark-400">{translationResult.feedback}</p></div>
+                                <div><p className="text-sm font-bold text-dark-200">Grammar Note</p><p className="text-sm text-dark-400 whitespace-pre-wrap leading-relaxed mt-2">{translationResult.feedback}</p></div>
                             </div>
                             {translationResult.missingSigns?.length > 0 && (
                                 <div className="mt-4 border-t border-success/20 pt-4 flex gap-4 flex-wrap">
